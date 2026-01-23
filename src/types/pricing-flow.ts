@@ -477,7 +477,7 @@ export interface MyParcelProduct {
 }
 
 export interface MyParcelSubscription {
-  tier: "Free" | "Start" | "Plus" | "Premium" | "Max";
+  tier: "Standaard" | "Start" | "Plus" | "Premium" | "Max";
   monthly_price: number;
   included_labels: number | "unlimited";
   discount_per_label: number;
