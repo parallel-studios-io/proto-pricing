@@ -55,8 +55,39 @@ export function MessageBubble({ message, className }: MessageBubbleProps) {
 
       {/* Content */}
       <div className="pl-9">
-        <div className="prose prose-invert prose-sm max-w-none prose-headings:text-foreground prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2 prose-p:text-foreground prose-p:leading-relaxed prose-strong:text-foreground prose-ul:my-2 prose-li:my-0.5 prose-table:text-sm prose-th:text-left prose-th:p-2 prose-th:border-b prose-th:border-border prose-td:p-2 prose-td:border-b prose-td:border-border/50">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+        <div className="prose prose-invert prose-sm max-w-none prose-headings:text-foreground prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2 prose-p:text-foreground prose-p:leading-relaxed prose-strong:text-foreground prose-ul:my-2 prose-li:my-0.5">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              table: ({ children }) => (
+                <div className="my-4 overflow-x-auto">
+                  <table className="min-w-full border-collapse text-sm">
+                    {children}
+                  </table>
+                </div>
+              ),
+              thead: ({ children }) => (
+                <thead className="border-b border-border/50">{children}</thead>
+              ),
+              th: ({ children }) => (
+                <th className="px-4 py-2 text-left font-semibold text-foreground whitespace-nowrap">
+                  {children}
+                </th>
+              ),
+              td: ({ children }) => (
+                <td className="px-4 py-2 text-foreground whitespace-nowrap">
+                  {children}
+                </td>
+              ),
+              tr: ({ children }) => (
+                <tr className="border-b border-border/30 last:border-0">
+                  {children}
+                </tr>
+              ),
+            }}
+          >
+            {message.content}
+          </ReactMarkdown>
         </div>
       </div>
     </div>
