@@ -1,5 +1,6 @@
 "use client";
 
+import ReactMarkdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { AgentBadge } from "./AgentBadge";
 import type { AgentId } from "@/types";
@@ -53,12 +54,8 @@ export function MessageBubble({ message, className }: MessageBubbleProps) {
 
       {/* Content */}
       <div className="pl-9">
-        <div className="prose prose-invert max-w-none text-sm leading-relaxed">
-          {message.content.split("\n").map((line, i) => (
-            <p key={i} className="mb-2 last:mb-0">
-              {line}
-            </p>
-          ))}
+        <div className="prose prose-invert prose-sm max-w-none prose-headings:text-foreground prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2 prose-p:text-foreground prose-p:leading-relaxed prose-strong:text-foreground prose-ul:my-2 prose-li:my-0.5 prose-table:text-sm prose-th:text-left prose-th:p-2 prose-th:border-b prose-th:border-border prose-td:p-2 prose-td:border-b prose-td:border-border/50">
+          <ReactMarkdown>{message.content}</ReactMarkdown>
         </div>
       </div>
     </div>
