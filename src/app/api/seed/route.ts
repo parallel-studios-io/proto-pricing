@@ -3,20 +3,25 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { seedDatabase } from "@/lib/generators/seed-database";
 import { DEMO_ORGANIZATION_ID } from "@/types/database";
 
-// Only allow seeding in development
+// Allow seeding in development or with a secret key in production
 const isDev = process.env.NODE_ENV === "development";
+const SEED_SECRET = process.env.SEED_SECRET;
 
 export async function POST(request: NextRequest) {
-  // Safety check - only allow in development
-  if (!isDev) {
+  const body = await request.json().catch(() => ({}));
+  const { secret } = body;
+
+  // Allow in dev mode, or in production with correct secret
+  const isAuthorized = isDev || (SEED_SECRET && secret === SEED_SECRET);
+
+  if (!isAuthorized) {
     return NextResponse.json(
-      { success: false, error: "Seeding is only available in development mode" },
+      { success: false, error: "Seeding requires authorization. Set SEED_SECRET env var and pass it in the request." },
       { status: 403 }
     );
   }
 
   try {
-    const body = await request.json().catch(() => ({}));
     const {
       organizationId = DEMO_ORGANIZATION_ID,
       clearExisting = true,
