@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Button } from "@/components/ui";
 
 interface HeaderProps {
@@ -7,7 +8,9 @@ interface HeaderProps {
   subtitle?: string;
   action?: {
     label: string;
-    onClick: () => void;
+    onClick?: () => void;
+    href?: string;
+    icon?: React.ReactNode;
   };
   children?: React.ReactNode;
 }
@@ -25,9 +28,19 @@ export function Header({ title, subtitle, action, children }: HeaderProps) {
         {children}
       </div>
       {action && (
-        <Button onClick={action.onClick} size="sm">
-          {action.label}
-        </Button>
+        action.href ? (
+          <Link href={action.href}>
+            <Button size="sm" className="gap-2">
+              {action.icon}
+              {action.label}
+            </Button>
+          </Link>
+        ) : (
+          <Button onClick={action.onClick} size="sm" className="gap-2">
+            {action.icon}
+            {action.label}
+          </Button>
+        )
       )}
     </header>
   );

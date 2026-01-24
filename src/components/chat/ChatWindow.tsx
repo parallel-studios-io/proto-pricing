@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
+import { SuggestedQuestions } from "./SuggestedQuestions";
 import type { AgentId } from "@/types";
 
 interface Message {
@@ -22,11 +23,15 @@ interface ChatResponse {
 interface ChatWindowProps {
   initialMessages?: Message[];
   onSendMessage?: (message: string, mentions: AgentId[]) => Promise<ChatResponse | void>;
+  suggestionsContext?: "default" | "pricing" | "recommendation";
+  showSuggestions?: boolean;
 }
 
 export function ChatWindow({
   initialMessages = [],
   onSendMessage,
+  suggestionsContext = "default",
+  showSuggestions = true,
 }: ChatWindowProps) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [isLoading, setIsLoading] = useState(false);
@@ -91,8 +96,23 @@ export function ChatWindow({
       <div className="flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-3xl space-y-6">
           {messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">
-              <p>Start a conversation by mentioning an agent with @</p>
+            <div className="flex h-full flex-col items-center justify-center gap-6">
+              <div className="text-center">
+                <h2 className="text-xl font-semibold mb-2">Talk to Your Business</h2>
+                <p className="text-muted">
+                  Mention an agent with @ to get their perspective
+                </p>
+              </div>
+              {showSuggestions && (
+                <SuggestedQuestions
+                  context={suggestionsContext}
+                  onSelectQuestion={(question, agentId) => {
+                    // Extract the mentions from the question and send
+                    const mentions: AgentId[] = agentId ? [agentId as AgentId] : [];
+                    handleSend(question, mentions);
+                  }}
+                />
+              )}
             </div>
           ) : (
             messages.map((message) => (

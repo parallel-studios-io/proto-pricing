@@ -3,7 +3,8 @@
 import { useState, useEffect } from "react";
 import { Header } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button } from "@/components/ui";
-import { Play, Loader2, CheckCircle, TrendingUp, TrendingDown, AlertTriangle, Users, DollarSign, BarChart3 } from "lucide-react";
+import { Play, Loader2, CheckCircle, TrendingUp, TrendingDown, AlertTriangle, Users, DollarSign, BarChart3, MessageSquare } from "lucide-react";
+import Link from "next/link";
 import type {
   PricingOption,
   CouncilEvaluation,
@@ -371,17 +372,25 @@ export default function AnalysisPage() {
                         {/* Recommendation Summary */}
                         {evaluation && isSelected && (
                           <div className="mt-4 p-3 bg-card rounded-lg">
-                            <div className="flex items-center gap-2 mb-2">
-                              <span className="text-sm font-medium">Council Synthesis</span>
-                              <Badge
-                                variant={
-                                  evaluation.recommendation.consensus === "strong"
-                                    ? "default"
-                                    : "secondary"
-                                }
-                              >
-                                {evaluation.recommendation.consensus} consensus
-                              </Badge>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium">Council Synthesis</span>
+                                <Badge
+                                  variant={
+                                    evaluation.recommendation.consensus === "strong"
+                                      ? "default"
+                                      : "secondary"
+                                  }
+                                >
+                                  {evaluation.recommendation.consensus} consensus
+                                </Badge>
+                              </div>
+                              <Link href={`/analysis/debate?option=${option.id}`}>
+                                <Button size="sm" variant="outline" className="gap-2">
+                                  <MessageSquare className="w-4 h-4" />
+                                  View Agent Debate
+                                </Button>
+                              </Link>
                             </div>
                             <p className="text-sm text-muted">
                               {evaluation.recommendation.summary}
