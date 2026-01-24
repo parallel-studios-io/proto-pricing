@@ -624,6 +624,115 @@ export interface OntologyAuditLog {
 }
 
 // =============================================================================
+// ANALYTICS TYPES
+// =============================================================================
+
+export interface CohortRetentionData {
+  id: string;
+  organization_id: string;
+  cohort_month: string;
+  month_offset: number;
+  cohort_size: number;
+  retained_count: number;
+  churned_count: number;
+  retention_rate?: number;
+  cohort_starting_mrr?: number;
+  retained_mrr?: number;
+  revenue_retention_rate?: number;
+  computed_at: string;
+  created_at: string;
+}
+
+export interface CustomerHealthScore {
+  id: string;
+  organization_id: string;
+  customer_id: string;
+  score_date: string;
+  usage_score?: number;
+  engagement_score?: number;
+  financial_score?: number;
+  health_score: number;
+  trend?: "improving" | "stable" | "declining";
+  trend_velocity?: number;
+  upgrade_readiness?: number;
+  churn_risk?: number;
+  expansion_potential?: number;
+  detected_patterns: string[];
+  created_at: string;
+}
+
+export interface CustomerRFMScore {
+  id: string;
+  organization_id: string;
+  customer_id: string;
+  computed_at: string;
+  recency_days: number;
+  frequency_count: number;
+  monetary_value: number;
+  recency_score?: number;
+  frequency_score?: number;
+  monetary_score?: number;
+  rfm_score: number;
+  rfm_segment?:
+    | "champions"
+    | "loyal_customers"
+    | "potential_loyalists"
+    | "recent_customers"
+    | "promising"
+    | "needs_attention"
+    | "about_to_sleep"
+    | "at_risk"
+    | "cant_lose_them"
+    | "hibernating"
+    | "lost";
+  created_at: string;
+}
+
+export interface ValueMetricCorrelation {
+  id: string;
+  organization_id: string;
+  metric_name: string;
+  metric_description?: string;
+  correlation_to_retention?: number;
+  correlation_to_expansion?: number;
+  correlation_to_churn?: number;
+  p_value_retention?: number;
+  p_value_expansion?: number;
+  p_value_churn?: number;
+  feature_importance_rank?: number;
+  predictive_power?: number;
+  sample_size: number;
+  analysis_period_start?: string;
+  analysis_period_end?: string;
+  computed_at: string;
+  created_at: string;
+}
+
+export interface AnalyticsRunLog {
+  id: string;
+  organization_id: string;
+  run_type:
+    | "full_refresh"
+    | "cohort_retention"
+    | "segmentation"
+    | "pattern_detection"
+    | "health_scores"
+    | "value_metrics"
+    | "economics_snapshot";
+  status: "running" | "completed" | "failed";
+  started_at: string;
+  completed_at?: string;
+  total_steps?: number;
+  completed_steps: number;
+  current_step?: string;
+  records_processed?: number;
+  errors_count: number;
+  error_details: Json;
+  result_summary: Json;
+  created_at: string;
+}
+
+// =============================================================================
 // SUPABASE DATABASE TYPE
 // =============================================================================
 
@@ -791,6 +900,32 @@ export interface Database {
         Row: OntologyAuditLog;
         Insert: Omit<OntologyAuditLog, "id" | "created_at">;
         Update: never; // Audit logs are immutable
+      };
+      // Analytics tables
+      cohort_retention_data: {
+        Row: CohortRetentionData;
+        Insert: Omit<CohortRetentionData, "id" | "churned_count" | "created_at">;
+        Update: Partial<Omit<CohortRetentionData, "id" | "churned_count">>;
+      };
+      customer_health_scores: {
+        Row: CustomerHealthScore;
+        Insert: Omit<CustomerHealthScore, "id" | "created_at">;
+        Update: Partial<Omit<CustomerHealthScore, "id">>;
+      };
+      customer_rfm_scores: {
+        Row: CustomerRFMScore;
+        Insert: Omit<CustomerRFMScore, "id" | "rfm_score" | "created_at">;
+        Update: Partial<Omit<CustomerRFMScore, "id" | "rfm_score">>;
+      };
+      value_metric_correlations: {
+        Row: ValueMetricCorrelation;
+        Insert: Omit<ValueMetricCorrelation, "id" | "created_at">;
+        Update: Partial<Omit<ValueMetricCorrelation, "id">>;
+      };
+      analytics_run_log: {
+        Row: AnalyticsRunLog;
+        Insert: Omit<AnalyticsRunLog, "id" | "created_at">;
+        Update: Partial<Omit<AnalyticsRunLog, "id">>;
       };
     };
   };
