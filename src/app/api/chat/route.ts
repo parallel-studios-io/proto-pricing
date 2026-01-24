@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { buildOntologyContext } from "@/lib/services/ontology-service";
+import { buildSystemPromptFromDb, buildSystemPrompt } from "@/lib/chat/context-builder";
 import { generateMyParcelData } from "@/lib/generators/myparcel";
-import { buildSystemPrompt } from "@/lib/chat/context-builder";
+import { DEMO_ORGANIZATION_ID } from "@/types/database";
 import type { ChatRequest, ChatResponse, ChatMessage } from "@/types/chat";
 import type { AgentId } from "@/types/agents";
 
@@ -21,7 +24,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
     }
 
     const body: ChatRequest = await request.json();
-    const { message, mentions = [], conversationHistory = [] } = body;
+    const { message, mentions = [], conversationHistory = [], organizationId = DEMO_ORGANIZATION_ID } = body;
 
     if (!message || typeof message !== "string") {
       return NextResponse.json(
@@ -30,14 +33,29 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       );
     }
 
-    // Generate fresh business data
-    const data = generateMyParcelData();
-
     // Determine which agent perspective to use (first mentioned agent, if any)
     const agentId = mentions.length > 0 ? mentions[0] : undefined;
 
-    // Build system prompt with data context
-    const systemPrompt = buildSystemPrompt(data, agentId);
+    // Try to use database context, fallback to in-memory if database not available
+    let systemPrompt: string;
+    try {
+      const supabase = createAdminClient();
+      const ontologyContext = await buildOntologyContext(supabase, organizationId);
+
+      // Check if we got any data from the database
+      if (ontologyContext && ontologyContext.trim().length > 0) {
+        systemPrompt = buildSystemPromptFromDb(ontologyContext, agentId);
+      } else {
+        // No data in database, use in-memory fallback
+        console.info("No ontology data in database, using in-memory data");
+        const data = generateMyParcelData();
+        systemPrompt = buildSystemPrompt(data, agentId);
+      }
+    } catch (dbError) {
+      console.warn("Database unavailable, falling back to in-memory data:", dbError);
+      const data = generateMyParcelData();
+      systemPrompt = buildSystemPrompt(data, agentId);
+    }
 
     // Build messages array from conversation history
     const messages: { role: "user" | "assistant"; content: string }[] = [

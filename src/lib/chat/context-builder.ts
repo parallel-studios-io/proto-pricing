@@ -3,7 +3,8 @@ import type { AgentId } from "@/types/agents";
 import { AGENTS } from "@/types/agents";
 
 /**
- * Build a data context string for the LLM system prompt
+ * Build a data context string for the LLM system prompt (legacy in-memory version)
+ * @deprecated Use buildOntologyContext from ontology-service.ts for database-backed context
  */
 export function buildDataContext(data: GeneratedMyParcelData): string {
   const { summary, pricingStructure, segments, economics } = data;
@@ -93,7 +94,8 @@ Focus your response through this lens while still providing helpful, data-driven
 }
 
 /**
- * Build the complete system prompt with data context
+ * Build the complete system prompt with data context (legacy version)
+ * @deprecated Use buildSystemPromptFromDb for database-backed context
  */
 export function buildSystemPrompt(
   data: GeneratedMyParcelData,
@@ -111,6 +113,36 @@ ${buildDataContext(data)}
 - Be concise but comprehensive
 - If asked about something not in the data, say so clearly
 - When discussing segments or tiers, use the exact names from the data`;
+
+  if (agentId) {
+    return basePrompt + buildAgentPersona(agentId);
+  }
+
+  return basePrompt;
+}
+
+/**
+ * Build the complete system prompt using ontology context from database
+ */
+export function buildSystemPromptFromDb(
+  ontologyContext: string,
+  agentId?: AgentId
+): string {
+  const basePrompt = `You are a pricing analyst assistant for a shipping platform (similar to MyParcel.nl).
+You have access to REAL business data from the database and should answer questions with ACTUAL numbers from the data below.
+
+## Your Business Data
+
+${ontologyContext}
+
+## Instructions
+- Always cite specific numbers from the data above
+- Format currency with € symbol and thousand separators
+- Format percentages with one decimal place
+- Be concise but comprehensive
+- If asked about something not in the data, say so clearly
+- When discussing segments or tiers, use the exact names from the data
+- You can reference the ontology data to answer questions about pricing strategy, customer segments, and business performance`;
 
   if (agentId) {
     return basePrompt + buildAgentPersona(agentId);
