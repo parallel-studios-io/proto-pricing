@@ -10,7 +10,8 @@
  * 6. Council Evaluation
  * 7. Decision Record
  *
- * All data is read from the database — no hardcoded company references.
+ * All data is pulled from the ontology — no raw DB queries or hardcoded company references.
+ * The engine has full strategic context: competitors, market, and positioning.
  */
 
 import {
@@ -23,10 +24,11 @@ import {
   DetectedSegment,
   UnitEconomics,
   PricingStructure,
+  CompetitiveContext,
 } from "@/types/pricing-flow";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { fetchRealPricingData, RealDataResult } from "@/lib/pricing/real-data-adapter";
+import { loadPricingDataFromOntology, OntologyDataResult } from "@/lib/pricing/ontology-to-flow";
 
 // =============================================================================
 // FLOW STATE MANAGEMENT
@@ -54,14 +56,14 @@ export function advanceStep(state: PricingFlowState): PricingFlowState {
 }
 
 // =============================================================================
-// STEP 1-4: DATA PROCESSING (DB-backed)
+// STEP 1-4: DATA PROCESSING (Ontology-backed)
 // =============================================================================
 
 export async function runDataProcessingSteps(
   state: PricingFlowState,
   supabase: SupabaseClient
 ): Promise<PricingFlowState> {
-  const data = await fetchRealPricingData(supabase, state.organization_id);
+  const data = await loadPricingDataFromOntology(supabase, state.organization_id);
 
   if (!data || data.segments.length === 0) {
     throw new Error("No company data found. Please set up a company first via /api/company/setup.");
@@ -101,30 +103,38 @@ function findHighestExpansionSegment(segments: DetectedSegment[]): DetectedSegme
   return [...segments].sort((a, b) => b.expansion_rate - a.expansion_rate)[0];
 }
 
+/** Format competitor pricing for descriptions */
+function competitorPricingSummary(ctx: CompetitiveContext): string {
+  const withPricing = ctx.competitors.filter((c) => c.price_range);
+  if (withPricing.length === 0) return "";
+  return withPricing.map((c) => `${c.name} (${c.price_range})`).join(", ");
+}
+
 // =============================================================================
-// STEP 5: OPTION GENERATION (dynamic, data-driven)
+// STEP 5: OPTION GENERATION (data-driven + competitive context)
 // =============================================================================
 
 export function generatePricingOptions(
   segments: DetectedSegment[],
   economics: UnitEconomics,
-  pricingStructure: PricingStructure
+  pricingStructure: PricingStructure,
+  competitiveContext?: CompetitiveContext
 ): PricingOption[] {
   const options: PricingOption[] = [];
   const tiers = pricingStructure.tiers;
   const lowestTier = tiers[0];
   const highestTier = tiers[tiers.length - 1];
-
-  // Derive a representative per-unit price from the mid-tier
   const midTier = tiers[Math.floor(tiers.length / 2)];
+  const ctx = competitiveContext;
 
-  // Derive a currency symbol from tier prices (use a simple heuristic)
-  // We pass through raw numbers and let the UI format with currency
   const totalArr = Object.entries(economics.arpu_by_segment)
     .reduce((sum, [segId, arpu]) => {
       const seg = segments.find((s) => s.id === segId);
       return sum + arpu * (seg?.customer_count || 0) * 12;
     }, 0);
+
+  // Build competitive pricing reference
+  const compPricing = ctx ? competitorPricingSummary(ctx) : "";
 
   // Option 1: Platform Minimum Fee
   const bottomSegment = findLowestValueSegment(segments);
@@ -134,18 +144,25 @@ export function generatePricingOptions(
     const affectedCustomers =
       bottomSegment.customer_count + Math.floor(secondBottomSegment.customer_count * 0.5);
     const expectedChurnRate = 0.25;
-    // Set minimum fee as ~10% of the lowest non-free tier price, min $4.95
     const minimumFee = lowestTier && lowestTier.price > 0
       ? Math.round(lowestTier.price * 0.5)
       : (midTier ? Math.round(midTier.price * 0.1) : 4.95);
     const remainingCustomers = affectedCustomers * (1 - expectedChurnRate);
     const newRevenue = remainingCustomers * minimumFee * 12;
 
+    // Competitive note for minimum fee
+    const competitorsWithFree = ctx?.competitors.filter((c) =>
+      c.price_range?.toLowerCase().includes("0") || c.pricing_model?.toLowerCase().includes("free")
+    ) || [];
+    const competitorNote = competitorsWithFree.length > 0
+      ? ` Competitors with free tiers: ${competitorsWithFree.map((c) => c.name).join(", ")}.`
+      : "";
+
     options.push({
       id: "platform-minimum",
       type: "minimum",
       description:
-        `Introduce a ${minimumFee}/month platform minimum for all accounts. Addresses unprofitable long-tail while maintaining accessibility.`,
+        `Introduce a ${minimumFee}/month platform minimum for all accounts. Addresses unprofitable long-tail while maintaining accessibility.${competitorNote}`,
       changes: [
         {
           type: "minimum",
@@ -180,11 +197,25 @@ export function generatePricingOptions(
   const primaryMetric = pricingStructure.value_metrics.find((m) => m.type === "primary");
   const metricName = primaryMetric?.name || "usage";
 
+  // Check if competitors use usage-based pricing
+  const usageCompetitors = ctx?.competitors.filter((c) =>
+    c.pricing_model?.toLowerCase().includes("usage") || c.pricing_model?.toLowerCase().includes("per-")
+  ) || [];
+  const usageNote = usageCompetitors.length > 0
+    ? ` ${usageCompetitors.map((c) => c.name).join(" and ")} already use${usageCompetitors.length === 1 ? "s" : ""} usage-based models.`
+    : "";
+
+  // Market trends that support usage pricing
+  const usageTrends = ctx?.market?.key_trends.filter((t) =>
+    t.toLowerCase().includes("api") || t.toLowerCase().includes("usage") || t.toLowerCase().includes("consumption")
+  ) || [];
+  const trendNote = usageTrends.length > 0 ? ` Market trend: ${usageTrends[0]}.` : "";
+
   options.push({
     id: "usage-pricing",
     type: "value_metric_change",
     description:
-      `Shift to pure usage-based pricing based on ${metricName}. Aligns revenue directly with customer value received.`,
+      `Shift to pure usage-based pricing based on ${metricName}. Aligns revenue directly with customer value received.${usageNote}${trendNote}`,
     changes: [
       {
         type: "structure",
@@ -208,7 +239,7 @@ export function generatePricingOptions(
       pessimistic_arr_change: Math.round(totalArr * -0.04),
       expected_churn_increase: 0.02,
       time_to_full_impact_months: 12,
-      confidence: 0.55,
+      confidence: usageCompetitors.length > 0 ? 0.6 : 0.55,
     },
     risk_profile: "high",
     complexity: "high",
@@ -224,6 +255,9 @@ export function generatePricingOptions(
     const topTierNewPrice = Math.round(highestTier.price * 1.2);
     const secondHighestTier = tiers.length > 1 ? tiers[tiers.length - 2] : null;
     const secondTierNewPrice = secondHighestTier ? Math.round(secondHighestTier.price * 1.2) : null;
+
+    // Competitive price comparison for top tier
+    const compNote = compPricing ? ` Competitor pricing: ${compPricing}.` : "";
 
     const changes: PricingOption["changes"] = [
       {
@@ -257,7 +291,7 @@ export function generatePricingOptions(
       id: "enterprise-premium",
       type: "price_increase",
       description:
-        `15% price increase on ${topSegment.name} segment tiers with enhanced SLA and dedicated support. Captures more value from highest-value segment.`,
+        `15% price increase on ${topSegment.name} segment tiers with enhanced SLA and dedicated support. Captures more value from highest-value segment.${compNote}`,
       changes,
       impact_model: {
         expected_arr_change: Math.round(topSegmentArr * priceIncreasePercent * expectedRetention),
@@ -275,7 +309,6 @@ export function generatePricingOptions(
 
   // Option 4: Good-Better-Best Restructure
   if (tiers.length >= 3) {
-    // Derive new tier prices from current structure
     const lowTiers = tiers.slice(0, Math.ceil(tiers.length / 3));
     const midTiers = tiers.slice(Math.ceil(tiers.length / 3), Math.ceil((tiers.length * 2) / 3));
     const highTiers = tiers.slice(Math.ceil((tiers.length * 2) / 3));
@@ -286,11 +319,19 @@ export function generatePricingOptions(
       ? Math.round((highTiers.reduce((s, t) => s + t.price, 0) / highTiers.length) * 1.3)
       : growthPrice * 3;
 
+    // Check if competitors use tiered models
+    const tieredCompetitors = ctx?.competitors.filter((c) =>
+      c.pricing_model?.toLowerCase().includes("tier") || c.pricing_model?.toLowerCase().includes("subscription")
+    ) || [];
+    const tierNote = tieredCompetitors.length > 0
+      ? ` Aligns with competitor models (${tieredCompetitors.map((c) => c.name).join(", ")}).`
+      : "";
+
     options.push({
       id: "tier-restructure",
       type: "packaging",
       description:
-        `Simplify to 3 tiers (Starter, Growth, Enterprise) with clearer value differentiation. Reduces complexity and improves upgrade path.`,
+        `Simplify to 3 tiers (Starter, Growth, Enterprise) with clearer value differentiation. Reduces complexity and improves upgrade path.${tierNote}`,
       changes: [
         {
           type: "tier",
@@ -332,18 +373,20 @@ export function generatePricingOptions(
 }
 
 // =============================================================================
-// STEP 6: COUNCIL EVALUATION
+// STEP 6: COUNCIL EVALUATION (with competitive context)
 // =============================================================================
 
 export function evaluateWithCouncil(
   option: PricingOption,
   segments: DetectedSegment[],
-  economics: UnitEconomics
+  economics: UnitEconomics,
+  competitiveContext?: CompetitiveContext
 ): CouncilEvaluation {
-  const financeView = evaluateAsFinance(option, economics);
-  const growthView = evaluateAsGrowth(option, segments);
-  const productView = evaluateAsProduct(option);
-  const strategyView = evaluateAsStrategy(option, economics);
+  const ctx = competitiveContext;
+  const financeView = evaluateAsFinance(option, economics, ctx);
+  const growthView = evaluateAsGrowth(option, segments, ctx);
+  const productView = evaluateAsProduct(option, ctx);
+  const strategyView = evaluateAsStrategy(option, economics, ctx);
 
   const recommendation = synthesizeRecommendation(
     option,
@@ -360,7 +403,11 @@ export function evaluateWithCouncil(
   };
 }
 
-function evaluateAsFinance(option: PricingOption, economics: UnitEconomics): AgentView {
+function evaluateAsFinance(
+  option: PricingOption,
+  economics: UnitEconomics,
+  ctx?: CompetitiveContext
+): AgentView {
   const impact = option.impact_model;
 
   let recommendation: AgentView["recommendation"] = "neutral";
@@ -392,12 +439,18 @@ function evaluateAsFinance(option: PricingOption, economics: UnitEconomics): Age
     keyPoints.push(`Extended timeline (${impact.time_to_full_impact_months}mo) delays cash flow benefit`);
   }
 
+  // Market context for financial projections
+  if (ctx?.market?.growth_rate) {
+    keyPoints.push(`Market growing at ${ctx.market.growth_rate} — ${impact.expected_arr_change > 0 ? "favorable" : "challenging"} backdrop for pricing changes`);
+  }
+
   const reasoning = `From a financial perspective, this option shows ${
     impact.expected_arr_change > 0 ? "positive" : "negative"
   } revenue impact with ${impact.confidence > 0.7 ? "reasonable" : "uncertain"} confidence. ` +
     `The ${option.risk_profile} risk profile is ${
       option.risk_profile === "low" ? "acceptable" : "a concern"
-    } given current margin pressures.`;
+    } given current margin pressures.` +
+    (ctx?.market?.tam_estimate ? ` TAM of ${ctx.market.tam_estimate} provides headroom for growth.` : "");
 
   return {
     agent: "CFO",
@@ -413,7 +466,11 @@ function evaluateAsFinance(option: PricingOption, economics: UnitEconomics): Age
   };
 }
 
-function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): AgentView {
+function evaluateAsGrowth(
+  option: PricingOption,
+  segments: DetectedSegment[],
+  ctx?: CompetitiveContext
+): AgentView {
   const keyPoints: string[] = [];
   let recommendation: AgentView["recommendation"] = "neutral";
 
@@ -428,13 +485,16 @@ function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): A
     recommendation = "support";
   }
 
-  // Use dynamic segment lookup
   const growthSegment = findHighestExpansionSegment(segments);
   if (growthSegment && option.type === "minimum") {
-    keyPoints.push(`May create friction for ${growthSegment.name} segment - the growth engine`);
+    keyPoints.push(`May create friction for ${growthSegment.name} segment — the growth engine`);
   }
 
-  if (option.type === "price_increase") {
+  // Competitor-aware growth assessment
+  if (option.type === "price_increase" && ctx?.competitors.length) {
+    const competitorNames = ctx.competitors.slice(0, 3).map((c) => c.name).join(", ");
+    keyPoints.push(`Price increase may shift win rate vs. ${competitorNames}`);
+  } else if (option.type === "price_increase") {
     keyPoints.push("Price increase may impact competitive win rate");
   }
 
@@ -443,12 +503,26 @@ function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): A
     if (recommendation !== "oppose") recommendation = "support";
   }
 
+  // Buying factors that affect growth
+  if (ctx?.market?.buying_factors.length) {
+    const pricingFactor = ctx.market.buying_factors.find((f) =>
+      f.toLowerCase().includes("pric") || f.toLowerCase().includes("cost")
+    );
+    if (pricingFactor && option.type === "price_increase") {
+      keyPoints.push(`"${pricingFactor}" is a key buying factor — price sensitivity is real`);
+    }
+  }
+
   const lowestSegment = findLowestValueSegment(segments);
   const secondLowest = findSecondLowestValueSegment(segments);
   const affectedNames = [lowestSegment?.name, secondLowest?.name].filter(Boolean).join("/");
 
+  const competitorRef = ctx?.competitors.length
+    ? ` against competitors like ${ctx.competitors[0].name}`
+    : "";
+
   const reasoning = `From a growth perspective, the ${(churnIncrease * 100).toFixed(1)}% expected churn increase ` +
-    `${churnIncrease < 0.05 ? "is acceptable" : "is concerning"}. ` +
+    `${churnIncrease < 0.05 ? "is acceptable" : "is concerning"}${competitorRef}. ` +
     `${option.type === "minimum" ? "The platform minimum may deter some potential customers but filters for quality." : ""}`;
 
   return {
@@ -459,13 +533,15 @@ function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): A
     impact: {
       churn_risk: `${(churnIncrease * 100).toFixed(1)}%`,
       segment_impact: option.type === "minimum" ? affectedNames || "Low-value segments" : "All segments",
-      competitive_position: option.type === "price_increase" ? "Weakened" : "Maintained",
+      competitive_position: option.type === "price_increase"
+        ? (ctx?.competitors.length ? `At risk vs. ${ctx.competitors[0].name}` : "Weakened")
+        : "Maintained",
     },
     confidence: 0.7,
   };
 }
 
-function evaluateAsProduct(option: PricingOption): AgentView {
+function evaluateAsProduct(option: PricingOption, ctx?: CompetitiveContext): AgentView {
   const keyPoints: string[] = [];
   let recommendation: AgentView["recommendation"] = "neutral";
 
@@ -488,13 +564,27 @@ function evaluateAsProduct(option: PricingOption): AgentView {
     keyPoints.push("Feature changes require product development coordination");
   }
 
+  // Compare against competitor differentiators
+  if (ctx?.competitors.length) {
+    const allDifferentiators = ctx.competitors.flatMap((c) => c.key_differentiators);
+    if (allDifferentiators.length > 0 && option.type === "packaging") {
+      keyPoints.push(`Packaging should differentiate from competitor features: ${allDifferentiators.slice(0, 3).join(", ")}`);
+    }
+  }
+
+  // Position our advantages
+  if (ctx?.positioning?.key_advantages.length && option.type === "price_increase") {
+    keyPoints.push(`Price increase justified by advantages: ${ctx.positioning.key_advantages.slice(0, 2).join(", ")}`);
+  }
+
   const reasoning = `From a product perspective, ${
     option.type === "value_metric_change"
       ? "usage-based pricing best aligns with how customers perceive value"
       : option.type === "packaging"
       ? "simpler packaging reduces decision complexity"
       : "the change has moderate product implications"
-  }. Customer experience impact should be carefully managed through communication.`;
+  }. Customer experience impact should be carefully managed through communication.` +
+    (ctx?.positioning?.value_proposition ? ` Our value proposition — "${ctx.positioning.value_proposition}" — should guide messaging.` : "");
 
   return {
     agent: "CPO",
@@ -510,7 +600,11 @@ function evaluateAsProduct(option: PricingOption): AgentView {
   };
 }
 
-function evaluateAsStrategy(option: PricingOption, economics: UnitEconomics): AgentView {
+function evaluateAsStrategy(
+  option: PricingOption,
+  economics: UnitEconomics,
+  ctx?: CompetitiveContext
+): AgentView {
   const keyPoints: string[] = [];
   let recommendation: AgentView["recommendation"] = "neutral";
 
@@ -529,17 +623,54 @@ function evaluateAsStrategy(option: PricingOption, economics: UnitEconomics): Ag
     }
   }
 
-  if (option.complexity === "high") {
-    keyPoints.push("Complex change is difficult to reverse - limits strategic optionality");
-  } else {
-    keyPoints.push("Change is reversible - maintains strategic flexibility");
+  // Competitive landscape assessment
+  if (ctx?.competitors.length) {
+    const competitorNames = ctx.competitors.map((c) => c.name).join(", ");
+    if (option.type === "price_increase") {
+      keyPoints.push(`Competitive landscape (${competitorNames}) limits pricing power — customers have alternatives`);
+    } else if (option.type === "minimum") {
+      const freemiumCompetitors = ctx.competitors.filter((c) =>
+        c.pricing_model?.toLowerCase().includes("free")
+      );
+      if (freemiumCompetitors.length > 0) {
+        keyPoints.push(`${freemiumCompetitors.map((c) => c.name).join(", ")} offer${freemiumCompetitors.length === 1 ? "s" : ""} freemium — minimum fee risks losing top-of-funnel`);
+      }
+    }
   }
 
-  keyPoints.push(
-    option.risk_profile === "low"
-      ? "Low-risk approach suitable for current market conditions"
-      : "Higher-risk approach requires strong market position"
-  );
+  // Strategic positioning risks
+  if (ctx?.positioning?.key_risks.length) {
+    const relevantRisk = ctx.positioning.key_risks.find((r) => {
+      const rl = r.toLowerCase();
+      if (option.type === "price_increase") return rl.includes("concentration") || rl.includes("compet");
+      if (option.type === "minimum") return rl.includes("free") || rl.includes("funnel");
+      return false;
+    });
+    if (relevantRisk) {
+      keyPoints.push(`Known risk: ${relevantRisk}`);
+    }
+  }
+
+  // Pricing philosophy alignment
+  if (ctx?.positioning?.pricing_philosophy) {
+    const philosophy = ctx.positioning.pricing_philosophy.toLowerCase();
+    if (option.type === "price_increase" && philosophy === "penetration") {
+      keyPoints.push(`Price increase conflicts with current penetration pricing philosophy`);
+      if (recommendation === "neutral") recommendation = "oppose";
+    } else if (option.type === "minimum" && philosophy === "penetration") {
+      keyPoints.push(`Platform minimum aligns with transitioning from penetration to value-based pricing`);
+    }
+  }
+
+  if (option.complexity === "high") {
+    keyPoints.push("Complex change is difficult to reverse — limits strategic optionality");
+  } else {
+    keyPoints.push("Change is reversible — maintains strategic flexibility");
+  }
+
+  const competitorClause = ctx?.competitors.length
+    ? ` in a market with ${ctx.competitors.length} key competitors`
+    : "";
 
   const reasoning = `From a strategic perspective, this option ${
     option.type === "minimum"
@@ -547,7 +678,7 @@ function evaluateAsStrategy(option: PricingOption, economics: UnitEconomics): Ag
       : option.type === "price_increase"
       ? "captures more value but increases concentration risk"
       : "provides tactical improvement without major strategic shift"
-  }. The ${option.complexity} complexity ${
+  }${competitorClause}. The ${option.complexity} complexity ${
     option.complexity === "low" ? "allows quick iteration" : "requires careful execution"
   }.`;
 
@@ -559,9 +690,11 @@ function evaluateAsStrategy(option: PricingOption, economics: UnitEconomics): Ag
     impact: {
       market_position: option.type === "minimum" ? "Premium" : "Unchanged",
       reversibility: option.complexity === "low" ? "High" : "Low",
-      strategic_optionality: option.complexity === "high" ? "Reduced" : "Maintained",
+      competitive_landscape: ctx?.competitors.length
+        ? `${ctx.competitors.length} competitors: ${ctx.competitors.map((c) => c.name).join(", ")}`
+        : "Unknown",
     },
-    confidence: 0.7,
+    confidence: ctx?.competitors.length ? 0.8 : 0.7,
   };
 }
 
@@ -659,23 +792,24 @@ export function createDecisionRecord(
 }
 
 // =============================================================================
-// FULL FLOW EXECUTION (DB-backed)
+// FULL FLOW EXECUTION (Ontology-backed)
 // =============================================================================
 
 export interface FlowResult {
   state: PricingFlowState;
-  summary: RealDataResult["summary"];
+  summary: OntologyDataResult["summary"];
   segments: DetectedSegment[];
   options: PricingOption[];
   evaluations: CouncilEvaluation[];
   recommendedOption: PricingOption | null;
+  competitiveContext: CompetitiveContext;
 }
 
 export async function runFullPricingFlow(
   organizationId: string,
   supabase: SupabaseClient
 ): Promise<FlowResult> {
-  const data = await fetchRealPricingData(supabase, organizationId);
+  const data = await loadPricingDataFromOntology(supabase, organizationId);
 
   if (!data || data.segments.length === 0) {
     throw new Error("No company data found. Please set up a company first.");
@@ -694,7 +828,8 @@ export async function runFullPricingFlow(
   const options = generatePricingOptions(
     data.segments,
     data.economics,
-    data.pricingStructure
+    data.pricingStructure,
+    data.competitiveContext
   );
 
   state = {
@@ -704,7 +839,7 @@ export async function runFullPricingFlow(
   };
 
   const evaluations: CouncilEvaluation[] = options.map((option) =>
-    evaluateWithCouncil(option, data.segments, data.economics)
+    evaluateWithCouncil(option, data.segments, data.economics, data.competitiveContext)
   );
 
   const scoredOptions = evaluations.map((e, i) => ({
@@ -736,5 +871,6 @@ export async function runFullPricingFlow(
     options,
     evaluations,
     recommendedOption,
+    competitiveContext: data.competitiveContext,
   };
 }

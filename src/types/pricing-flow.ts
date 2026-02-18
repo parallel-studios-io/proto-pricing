@@ -285,6 +285,35 @@ export interface PriceSensitivityModel {
 }
 
 // =============================================================================
+// COMPETITIVE CONTEXT (from ontology)
+// =============================================================================
+
+export interface CompetitiveContext {
+  competitors: {
+    name: string;
+    positioning?: string;
+    pricing_model?: string;
+    price_range?: string;
+    key_differentiators: string[];
+    estimated_market_share?: string;
+  }[];
+  market: {
+    category: string;
+    tam_estimate: string;
+    growth_rate: string;
+    key_trends: string[];
+    buying_factors: string[];
+  } | null;
+  positioning: {
+    value_proposition: string;
+    target_segments: string[];
+    key_advantages: string[];
+    key_risks: string[];
+    pricing_philosophy: string;
+  } | null;
+}
+
+// =============================================================================
 // STEP 5: OPTION GENERATION (Output)
 // =============================================================================
 

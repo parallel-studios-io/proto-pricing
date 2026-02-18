@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchRealPricingData } from "@/lib/pricing/real-data-adapter";
+import { loadPricingDataFromOntology } from "@/lib/pricing/ontology-to-flow";
 import {
   generatePricingOptions,
   evaluateWithCouncil,
@@ -14,27 +14,28 @@ export async function POST(request: Request) {
     const { organizationId = DEMO_ORGANIZATION_ID } = body;
 
     const supabase = createAdminClient();
-    const realData = await fetchRealPricingData(supabase, organizationId);
+    const data = await loadPricingDataFromOntology(supabase, organizationId);
 
-    if (!realData || realData.segments.length === 0) {
+    if (!data || data.segments.length === 0) {
       return NextResponse.json(
         { success: false, error: "No company data found. Please set up a company first via /api/company/setup." },
         { status: 400 }
       );
     }
 
-    const { segments, economics, pricingStructure, summary } = realData;
+    const { segments, economics, pricingStructure, competitiveContext, summary } = data;
 
-    // Generate pricing options based on the data
+    // Generate pricing options with competitive context
     const options: PricingOption[] = generatePricingOptions(
       segments,
       economics,
-      pricingStructure
+      pricingStructure,
+      competitiveContext
     );
 
-    // Evaluate each option with the council
+    // Evaluate each option with the council (with competitive context)
     const evaluations: CouncilEvaluation[] = options.map((option) =>
-      evaluateWithCouncil(option, segments, economics)
+      evaluateWithCouncil(option, segments, economics, competitiveContext)
     );
 
     // Find recommended option (highest consensus with positive score)
@@ -64,6 +65,7 @@ export async function POST(request: Request) {
         recommendedOption,
         pricingStructure,
         economics,
+        competitiveContext,
       },
     });
   } catch (error) {
@@ -78,15 +80,16 @@ export async function POST(request: Request) {
 export async function GET() {
   try {
     const supabase = createAdminClient();
-    const realData = await fetchRealPricingData(supabase, DEMO_ORGANIZATION_ID);
+    const data = await loadPricingDataFromOntology(supabase, DEMO_ORGANIZATION_ID);
 
-    if (realData && realData.segments.length > 0) {
+    if (data && data.segments.length > 0) {
       return NextResponse.json({
         success: true,
         data: {
-          summary: realData.summary,
-          segmentCount: realData.segments.length,
+          summary: data.summary,
+          segmentCount: data.segments.length,
           optionCount: 4,
+          competitorCount: data.competitiveContext.competitors.length,
           usingRealData: true,
         },
       });
