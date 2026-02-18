@@ -125,12 +125,21 @@ async function fetchEconomics(
     ltvBySegment[segment.id] = segment.avg_ltv;
   }
 
-  // Default tier churn rates if not available
-  churnByTier["Standaard"] = 0.08;
-  churnByTier["Start"] = 0.05;
-  churnByTier["Plus"] = 0.03;
-  churnByTier["Premium"] = 0.02;
-  churnByTier["Max"] = 0.01;
+  // Fetch tiers for churn rate defaults based on position
+  const { data: tiers } = await supabase
+    .from("pricing_tiers")
+    .select("id, name, position")
+    .eq("organization_id", organizationId)
+    .eq("is_active", true)
+    .order("position", { ascending: true });
+
+  // Assign estimated churn rates by tier position (lower tiers churn more)
+  for (const tier of tiers || []) {
+    const totalTiers = (tiers || []).length;
+    const positionRatio = tier.position / totalTiers; // 0..1 from cheapest to most expensive
+    // Churn ranges from ~8% (cheapest) to ~1% (most expensive)
+    churnByTier[tier.name] = Math.max(0.01, 0.08 - positionRatio * 0.07);
+  }
 
   // Calculate concentration metrics
   const sortedSegments = [...segments].sort((a, b) => b.revenue_share - a.revenue_share);
@@ -216,25 +225,22 @@ async function fetchPricingStructure(
     position: index + 1,
   }));
 
-  // Default value metrics for shipping platform
-  const valueMetrics: ValueMetric[] = [
-    {
-      id: "shipping_volume",
-      name: "Shipping Volume",
-      type: "primary",
-      correlation_to_expansion: 0.85,
-      measurement_method: "Monthly label count",
-      examples: ["Labels printed", "Shipments created"],
-    },
-    {
-      id: "carrier_diversity",
-      name: "Carrier Diversity",
-      type: "secondary",
-      correlation_to_expansion: 0.6,
-      measurement_method: "Number of carriers used",
-      examples: ["PostNL", "DHL", "DPD", "UPS"],
-    },
-  ];
+  // Fetch value metrics from database
+  const { data: dbMetrics } = await supabase
+    .from("value_metrics")
+    .select("*")
+    .eq("organization_id", organizationId)
+    .eq("is_active", true)
+    .order("metric_type", { ascending: true });
+
+  const valueMetrics: ValueMetric[] = (dbMetrics || []).map((m) => ({
+    id: m.id,
+    name: m.name,
+    type: m.metric_type === "primary" ? "primary" as const : "secondary" as const,
+    correlation_to_expansion: m.correlation_to_expansion || 0.5,
+    measurement_method: m.description || "Tracked via platform",
+    examples: [],
+  }));
 
   return {
     model_type: "hybrid",
@@ -248,15 +254,14 @@ async function fetchPricingStructure(
 }
 
 /**
- * Default tiers if none in database
+ * Default tiers if none in database — generic placeholder
  */
 function getDefaultTiers(): PricingTier[] {
   return [
-    { id: "standaard", name: "Standaard", price: 0, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.4, position: 1 },
-    { id: "start", name: "Start", price: 25, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.25, position: 2 },
-    { id: "plus", name: "Plus", price: 50, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.20, position: 3 },
-    { id: "premium", name: "Premium", price: 75, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.12, position: 4 },
-    { id: "max", name: "Max", price: 125, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.03, position: 5 },
+    { id: "free", name: "Free", price: 0, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.02, position: 1 },
+    { id: "starter", name: "Starter", price: 29, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.15, position: 2 },
+    { id: "pro", name: "Pro", price: 99, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.35, position: 3 },
+    { id: "enterprise", name: "Enterprise", price: 299, billing_interval: "monthly", value_metric_limits: {}, features: [], customer_count: 0, revenue: 0, revenue_share: 0.48, position: 4 },
   ];
 }
 

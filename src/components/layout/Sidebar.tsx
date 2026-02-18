@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   PenSquare,
   Search,
@@ -10,8 +11,11 @@ import {
   Bot,
   Settings,
   Play,
+  ArrowLeftRight,
+  Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DEMO_ORGANIZATION_ID } from "@/types/database";
 
 interface NavItem {
   label: string;
@@ -38,15 +42,34 @@ const chatHistory = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [companyName, setCompanyName] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Check sessionStorage first for instant display
+    try {
+      const cached = sessionStorage.getItem("proto-company-name");
+      if (cached) setCompanyName(cached);
+    } catch {
+      // sessionStorage not available
+    }
+  }, []);
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r border-border bg-card">
-      {/* Logo */}
-      <div className="flex h-14 items-center gap-2 border-b border-border px-4">
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-white text-black font-bold text-sm">
-          P
+      {/* Logo + Company */}
+      <div className="border-b border-border px-4 py-3">
+        <div className="flex items-center gap-2">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-white text-black font-bold text-sm">
+            P
+          </div>
+          <span className="font-semibold">Proto</span>
         </div>
-        <span className="font-semibold">Proto</span>
+        {companyName && (
+          <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+            <Building2 className="h-3 w-3" />
+            <span className="truncate">{companyName}</span>
+          </div>
+        )}
       </div>
 
       {/* Navigation */}
@@ -94,6 +117,17 @@ export function Sidebar() {
           </ul>
         </div>
       </nav>
+
+      {/* Switch Company */}
+      <div className="border-t border-border p-3">
+        <Link
+          href="/setup"
+          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-white/5 hover:text-white transition-colors"
+        >
+          <ArrowLeftRight className="h-4 w-4" />
+          Switch Company
+        </Link>
+      </div>
     </aside>
   );
 }

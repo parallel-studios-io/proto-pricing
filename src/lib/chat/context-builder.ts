@@ -126,9 +126,14 @@ ${buildDataContext(data)}
  */
 export function buildSystemPromptFromDb(
   ontologyContext: string,
-  agentId?: AgentId
+  agentId?: AgentId,
+  companyName?: string,
+  currencySymbol?: string
 ): string {
-  const basePrompt = `You are a pricing analyst assistant for a shipping platform (similar to MyParcel.nl).
+  const name = companyName ?? "B2B SaaS company";
+  const currency = currencySymbol ?? "€";
+
+  const basePrompt = `You are a pricing analyst assistant for ${name}.
 You have access to REAL business data from the database and should answer questions with ACTUAL numbers from the data below.
 
 ## Your Business Data
@@ -137,7 +142,7 @@ ${ontologyContext}
 
 ## Instructions
 - Always cite specific numbers from the data above
-- Format currency with € symbol and thousand separators
+- Format currency with ${currency} symbol and thousand separators
 - Format percentages with one decimal place
 - Be concise but comprehensive
 - If asked about something not in the data, say so clearly

@@ -4,7 +4,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database, Ontology, Segment, PricingTier } from "@/types/database";
+import type { Database, Ontology, Segment, PricingTier, Competitor } from "@/types/database";
 import {
   getSegments,
   createSegment,
@@ -20,6 +20,7 @@ import {
 import { getValueMetrics } from "@/lib/db/ontology/value-metrics";
 import { getPatterns } from "@/lib/db/ontology/patterns";
 import { getLatestEconomicsSnapshot } from "@/lib/db/ontology/economics";
+import { getCompetitors } from "@/lib/db/ontology/competitors";
 import {
   createOntologySnapshot,
   getCurrentOntology,
@@ -294,7 +295,20 @@ export async function buildOntologyContext(
   supabase: DbClient,
   organizationId: string
 ): Promise<string> {
-  const ontology = await getOntology(supabase, organizationId);
+  const [ontology, competitors] = await Promise.all([
+    getOntology(supabase, organizationId),
+    getCompetitors(supabase, organizationId, { activeOnly: true }),
+  ]);
+
+  // Resolve currency symbol from company profile
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = supabase as any;
+  const { data: org } = await db
+    .from("organizations")
+    .select("company_profile")
+    .eq("id", organizationId)
+    .single();
+  const cs = (org?.company_profile?.currency_symbol as string) || "€";
 
   const sections: string[] = [];
 
@@ -302,8 +316,8 @@ export async function buildOntologyContext(
   if (ontology.economics) {
     sections.push(`### Key Metrics
 - Total Customers: ${ontology.economics.total_customers.toLocaleString()}
-- MRR: €${ontology.economics.total_mrr.toLocaleString()}
-- ARR: €${ontology.economics.total_arr.toLocaleString()}
+- MRR: ${cs}${ontology.economics.total_mrr.toLocaleString()}
+- ARR: ${cs}${ontology.economics.total_arr.toLocaleString()}
 - Net Revenue Retention: ${ontology.economics.net_revenue_retention || "N/A"}%
 - Concentration Risk: ${ontology.economics.concentration_risk_level || "unknown"}`);
   }
@@ -314,7 +328,7 @@ export async function buildOntologyContext(
       .sort((a, b) => a.position - b.position)
       .map(
         (t) =>
-          `| ${t.name} | €${t.price_monthly} | ${t.customer_count.toLocaleString()} | €${t.total_revenue.toLocaleString()} | ${(t.revenue_share * 100).toFixed(1)}% |`
+          `| ${t.name} | ${cs}${t.price_monthly} | ${t.customer_count.toLocaleString()} | ${cs}${t.total_revenue.toLocaleString()} | ${(t.revenue_share * 100).toFixed(1)}% |`
       )
       .join("\n");
 
@@ -330,7 +344,7 @@ ${tierRows}`);
     const segmentRows = ontology.segments
       .map(
         (s) =>
-          `| ${s.name} | ${s.customer_count.toLocaleString()} | €${s.avg_mrr.toLocaleString()} | €${s.avg_ltv.toLocaleString()} | ${(s.churn_rate * 100).toFixed(1)}% |`
+          `| ${s.name} | ${s.customer_count.toLocaleString()} | ${cs}${s.avg_mrr.toLocaleString()} | ${cs}${s.avg_ltv.toLocaleString()} | ${(s.churn_rate * 100).toFixed(1)}% |`
       )
       .join("\n");
 
@@ -365,6 +379,57 @@ ${metricsText}`);
 
     sections.push(`### Behavioral Patterns
 ${patternsText}`);
+  }
+
+  // Competitors
+  if (competitors.length > 0) {
+    const competitorRows = competitors
+      .map(
+        (c: Competitor) =>
+          `| ${c.name} | ${c.pricing_model || "N/A"} | ${c.positioning || "N/A"} | ${c.price_range || "N/A"} |`
+      )
+      .join("\n");
+
+    sections.push(`### Competitors
+
+| Name | Pricing Model | Positioning | Price Range |
+|------|---------------|-------------|-------------|
+${competitorRows}`);
+  }
+
+  // Market Context (from economics snapshot)
+  if (ontology.economics?.market_context) {
+    const mc = ontology.economics.market_context as Record<string, unknown>;
+    const lines: string[] = [];
+    if (mc.market_category) lines.push(`- Market Category: ${mc.market_category}`);
+    if (mc.tam_estimate) lines.push(`- TAM: ${mc.tam_estimate}`);
+    if (mc.growth_rate) lines.push(`- Market Growth Rate: ${mc.growth_rate}`);
+    if (Array.isArray(mc.key_trends) && mc.key_trends.length > 0) {
+      lines.push(`- Key Trends: ${mc.key_trends.join(", ")}`);
+    }
+    if (Array.isArray(mc.buying_factors) && mc.buying_factors.length > 0) {
+      lines.push(`- Buying Factors: ${mc.buying_factors.join(", ")}`);
+    }
+    if (lines.length > 0) {
+      sections.push(`### Market Context\n${lines.join("\n")}`);
+    }
+  }
+
+  // Strategic Positioning (from economics snapshot)
+  if (ontology.economics?.strategic_positioning) {
+    const sp = ontology.economics.strategic_positioning as Record<string, unknown>;
+    const lines: string[] = [];
+    if (sp.value_proposition) lines.push(`- Value Proposition: ${sp.value_proposition}`);
+    if (Array.isArray(sp.key_advantages) && sp.key_advantages.length > 0) {
+      lines.push(`- Key Advantages: ${sp.key_advantages.join(", ")}`);
+    }
+    if (Array.isArray(sp.key_risks) && sp.key_risks.length > 0) {
+      lines.push(`- Key Risks: ${sp.key_risks.join(", ")}`);
+    }
+    if (sp.pricing_philosophy) lines.push(`- Pricing Philosophy: ${sp.pricing_philosophy}`);
+    if (lines.length > 0) {
+      sections.push(`### Strategic Positioning\n${lines.join("\n")}`);
+    }
   }
 
   return sections.join("\n\n");

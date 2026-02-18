@@ -19,6 +19,9 @@ export interface Organization {
   name: string;
   slug: string;
   settings: Json;
+  company_profile?: Json;
+  setup_status?: "pending" | "generating" | "ready" | "error";
+  setup_error?: string;
   created_at: string;
   updated_at: string;
 }
@@ -377,6 +380,22 @@ export interface Transaction {
 // ONTOLOGY TYPES
 // =============================================================================
 
+export interface Competitor {
+  id: string;
+  organization_id: string;
+  name: string;
+  website?: string;
+  positioning?: string;
+  pricing_model?: string;
+  price_range?: string;
+  key_differentiators: string[];
+  estimated_market_share?: string;
+  source: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SegmentCriteria {
   company_size?: ("startup" | "smb" | "mid_market" | "enterprise")[];
   mrr_range?: [number, number];
@@ -504,6 +523,9 @@ export interface EconomicsSnapshot {
   concentration_description?: string;
   segment_economics: SegmentEconomics[];
   price_sensitivity_model: Record<string, PriceSensitivity>;
+  market_context?: Json;
+  strategic_positioning?: Json;
+  competitor_summary?: Json;
   created_at: string;
 }
 
@@ -741,7 +763,9 @@ export interface Database {
     Tables: {
       organizations: {
         Row: Organization;
-        Insert: Omit<Organization, "id" | "created_at" | "updated_at">;
+        Insert: Omit<Organization, "id" | "created_at" | "updated_at"> & {
+          id?: string;
+        };
         Update: Partial<Omit<Organization, "id">>;
       };
       organization_members: {
@@ -900,6 +924,11 @@ export interface Database {
         Row: OntologyAuditLog;
         Insert: Omit<OntologyAuditLog, "id" | "created_at">;
         Update: never; // Audit logs are immutable
+      };
+      competitors: {
+        Row: Competitor;
+        Insert: Omit<Competitor, "id" | "created_at" | "updated_at">;
+        Update: Partial<Omit<Competitor, "id">>;
       };
       // Analytics tables
       cohort_retention_data: {

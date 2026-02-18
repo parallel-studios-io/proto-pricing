@@ -9,13 +9,13 @@
  * 5. Option Generation
  * 6. Council Evaluation
  * 7. Decision Record
+ *
+ * All data is read from the database — no hardcoded company references.
  */
 
 import {
   PricingFlowState,
   PricingOption,
-  PricingChange,
-  ImpactModel,
   CouncilEvaluation,
   AgentView,
   CouncilRecommendation,
@@ -25,10 +25,8 @@ import {
   PricingStructure,
 } from "@/types/pricing-flow";
 
-import {
-  generateMyParcelData,
-  GeneratedMyParcelData,
-} from "@/lib/generators/myparcel";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { fetchRealPricingData, RealDataResult } from "@/lib/pricing/real-data-adapter";
 
 // =============================================================================
 // FLOW STATE MANAGEMENT
@@ -56,19 +54,22 @@ export function advanceStep(state: PricingFlowState): PricingFlowState {
 }
 
 // =============================================================================
-// STEP 1-4: DATA PROCESSING (Uses generators)
+// STEP 1-4: DATA PROCESSING (DB-backed)
 // =============================================================================
 
 export async function runDataProcessingSteps(
-  state: PricingFlowState
+  state: PricingFlowState,
+  supabase: SupabaseClient
 ): Promise<PricingFlowState> {
-  // Generate all data at once using our MyParcel generator
-  const data = generateMyParcelData();
+  const data = await fetchRealPricingData(supabase, state.organization_id);
+
+  if (!data || data.segments.length === 0) {
+    throw new Error("No company data found. Please set up a company first via /api/company/setup.");
+  }
 
   return {
     ...state,
     current_step: 4,
-    unified_customers: data.customers,
     segments: data.segments,
     pricing_structure: data.pricingStructure,
     economics: data.economics,
@@ -76,7 +77,32 @@ export async function runDataProcessingSteps(
 }
 
 // =============================================================================
-// STEP 5: OPTION GENERATION
+// HELPERS — dynamic segment lookup
+// =============================================================================
+
+/** Lowest-revenue segment (long-tail / hobby) */
+function findLowestValueSegment(segments: DetectedSegment[]): DetectedSegment | undefined {
+  return [...segments].sort((a, b) => a.revenue_share - b.revenue_share)[0];
+}
+
+/** Second-lowest-revenue segment */
+function findSecondLowestValueSegment(segments: DetectedSegment[]): DetectedSegment | undefined {
+  const sorted = [...segments].sort((a, b) => a.revenue_share - b.revenue_share);
+  return sorted[1];
+}
+
+/** Highest-revenue segment (enterprise) */
+function findHighestValueSegment(segments: DetectedSegment[]): DetectedSegment | undefined {
+  return [...segments].sort((a, b) => b.revenue_share - a.revenue_share)[0];
+}
+
+/** Highest-expansion segment (growth engine) */
+function findHighestExpansionSegment(segments: DetectedSegment[]): DetectedSegment | undefined {
+  return [...segments].sort((a, b) => b.expansion_rate - a.expansion_rate)[0];
+}
+
+// =============================================================================
+// STEP 5: OPTION GENERATION (dynamic, data-driven)
 // =============================================================================
 
 export function generatePricingOptions(
@@ -85,17 +111,33 @@ export function generatePricingOptions(
   pricingStructure: PricingStructure
 ): PricingOption[] {
   const options: PricingOption[] = [];
+  const tiers = pricingStructure.tiers;
+  const lowestTier = tiers[0];
+  const highestTier = tiers[tiers.length - 1];
+
+  // Derive a representative per-unit price from the mid-tier
+  const midTier = tiers[Math.floor(tiers.length / 2)];
+
+  // Derive a currency symbol from tier prices (use a simple heuristic)
+  // We pass through raw numbers and let the UI format with currency
+  const totalArr = Object.entries(economics.arpu_by_segment)
+    .reduce((sum, [segId, arpu]) => {
+      const seg = segments.find((s) => s.id === segId);
+      return sum + arpu * (seg?.customer_count || 0) * 12;
+    }, 0);
 
   // Option 1: Platform Minimum Fee
-  // Address the unprofitable bottom 50%
-  const hobbySegment = segments.find((s) => s.id === "hobby");
-  const smallSegment = segments.find((s) => s.id === "small");
+  const bottomSegment = findLowestValueSegment(segments);
+  const secondBottomSegment = findSecondLowestValueSegment(segments);
 
-  if (hobbySegment && smallSegment) {
+  if (bottomSegment && secondBottomSegment) {
     const affectedCustomers =
-      hobbySegment.customer_count + Math.floor(smallSegment.customer_count * 0.5);
-    const expectedChurnRate = 0.25; // 25% of affected will churn
-    const minimumFee = 4.95;
+      bottomSegment.customer_count + Math.floor(secondBottomSegment.customer_count * 0.5);
+    const expectedChurnRate = 0.25;
+    // Set minimum fee as ~10% of the lowest non-free tier price, min $4.95
+    const minimumFee = lowestTier && lowestTier.price > 0
+      ? Math.round(lowestTier.price * 0.5)
+      : (midTier ? Math.round(midTier.price * 0.1) : 4.95);
     const remainingCustomers = affectedCustomers * (1 - expectedChurnRate);
     const newRevenue = remainingCustomers * minimumFee * 12;
 
@@ -103,26 +145,26 @@ export function generatePricingOptions(
       id: "platform-minimum",
       type: "minimum",
       description:
-        "Introduce a €4.95/month platform minimum for all accounts. Addresses unprofitable long-tail while maintaining accessibility.",
+        `Introduce a ${minimumFee}/month platform minimum for all accounts. Addresses unprofitable long-tail while maintaining accessibility.`,
       changes: [
         {
           type: "minimum",
           target: "all",
-          from: "€0",
-          to: "€4.95/mo",
+          from: `${lowestTier?.price || 0}`,
+          to: `${minimumFee}/mo`,
           description: "New platform minimum fee for all accounts",
         },
         {
           type: "feature",
-          target: "Free tier",
-          from: "Free",
-          to: "Starter (€4.95)",
-          description: "Rename Free tier to Starter with minimum fee",
+          target: lowestTier?.name || "Free tier",
+          from: lowestTier?.name || "Free",
+          to: `Starter (${minimumFee})`,
+          description: `Convert ${lowestTier?.name || "Free"} tier to paid minimum`,
         },
       ],
       impact_model: {
-        expected_arr_change: Math.round(newRevenue * 0.7), // Conservative
-        expected_arr_change_percent: 2.5,
+        expected_arr_change: Math.round(newRevenue * 0.7),
+        expected_arr_change_percent: totalArr > 0 ? Math.round((newRevenue * 0.7 / totalArr) * 100 * 10) / 10 : 2.5,
         optimistic_arr_change: Math.round(newRevenue),
         pessimistic_arr_change: Math.round(newRevenue * 0.4),
         expected_churn_increase: expectedChurnRate,
@@ -134,33 +176,36 @@ export function generatePricingOptions(
     });
   }
 
-  // Option 2: Value Metric Shift - Labels as primary
+  // Option 2: Value Metric Shift
+  const primaryMetric = pricingStructure.value_metrics.find((m) => m.type === "primary");
+  const metricName = primaryMetric?.name || "usage";
+
   options.push({
     id: "usage-pricing",
     type: "value_metric_change",
     description:
-      "Shift to pure usage-based pricing with per-label fees. Aligns revenue directly with customer value received.",
+      `Shift to pure usage-based pricing based on ${metricName}. Aligns revenue directly with customer value received.`,
     changes: [
       {
         type: "structure",
         target: "pricing_model",
-        from: "Subscription + Usage",
+        from: pricingStructure.model_type,
         to: "Pure Usage",
-        description: "Remove subscription tiers, charge per label only",
+        description: `Remove subscription tiers, charge per ${metricName} only`,
       },
       {
         type: "price",
-        target: "per_label",
-        from: "€0.65-1.00",
-        to: "€0.85 flat",
-        description: "Standardized per-label pricing across all volumes",
+        target: `per_${metricName.toLowerCase().replace(/\s+/g, "_")}`,
+        from: "Variable",
+        to: "Flat rate",
+        description: `Standardized per-${metricName.toLowerCase()} pricing across all volumes`,
       },
     ],
     impact_model: {
-      expected_arr_change: -150000, // Slight decrease initially
+      expected_arr_change: Math.round(totalArr * -0.015),
       expected_arr_change_percent: -1.5,
-      optimistic_arr_change: 200000,
-      pessimistic_arr_change: -400000,
+      optimistic_arr_change: Math.round(totalArr * 0.02),
+      pessimistic_arr_change: Math.round(totalArr * -0.04),
       expected_churn_increase: 0.02,
       time_to_full_impact_months: 12,
       confidence: 0.55,
@@ -169,52 +214,56 @@ export function generatePricingOptions(
     complexity: "high",
   });
 
-  // Option 3: Enterprise Tier Enhancement
-  const enterpriseSegment = segments.find((s) => s.id === "enterprise");
-  if (enterpriseSegment) {
-    const enterpriseRevenue = enterpriseSegment.revenue_share;
+  // Option 3: Top-Tier Price Increase
+  const topSegment = findHighestValueSegment(segments);
+  if (topSegment && highestTier) {
     const priceIncreasePercent = 0.15;
     const expectedRetention = 0.95;
+    const topSegmentArr = topSegment.revenue_share * totalArr;
+
+    const topTierNewPrice = Math.round(highestTier.price * 1.2);
+    const secondHighestTier = tiers.length > 1 ? tiers[tiers.length - 2] : null;
+    const secondTierNewPrice = secondHighestTier ? Math.round(secondHighestTier.price * 1.2) : null;
+
+    const changes: PricingOption["changes"] = [
+      {
+        type: "price",
+        target: highestTier.name,
+        from: `${highestTier.price}`,
+        to: `${topTierNewPrice}`,
+        description: `20% price increase on ${highestTier.name} tier`,
+      },
+    ];
+
+    if (secondHighestTier && secondTierNewPrice) {
+      changes.push({
+        type: "price",
+        target: secondHighestTier.name,
+        from: `${secondHighestTier.price}`,
+        to: `${secondTierNewPrice}`,
+        description: `20% price increase on ${secondHighestTier.name} tier`,
+      });
+    }
+
+    changes.push({
+      type: "feature",
+      target: topSegment.name,
+      from: "Standard SLA",
+      to: "99.9% SLA + Priority Support",
+      description: "Enhanced service level for premium tiers",
+    });
 
     options.push({
       id: "enterprise-premium",
       type: "price_increase",
       description:
-        "15% price increase on enterprise tier with enhanced SLA and dedicated support. Captures more value from highest-value segment.",
-      changes: [
-        {
-          type: "price",
-          target: "Max tier",
-          from: "€249.95",
-          to: "€299.95",
-          description: "20% price increase on Max tier",
-        },
-        {
-          type: "price",
-          target: "Premium tier",
-          from: "€99.95",
-          to: "€119.95",
-          description: "20% price increase on Premium tier",
-        },
-        {
-          type: "feature",
-          target: "Enterprise",
-          from: "Standard SLA",
-          to: "99.9% SLA + Priority Support",
-          description: "Enhanced service level for premium tiers",
-        },
-      ],
+        `15% price increase on ${topSegment.name} segment tiers with enhanced SLA and dedicated support. Captures more value from highest-value segment.`,
+      changes,
       impact_model: {
-        expected_arr_change: Math.round(
-          enterpriseRevenue * 10_000_000 * priceIncreasePercent * expectedRetention
-        ),
-        expected_arr_change_percent: 8.5,
-        optimistic_arr_change: Math.round(
-          enterpriseRevenue * 10_000_000 * priceIncreasePercent
-        ),
-        pessimistic_arr_change: Math.round(
-          enterpriseRevenue * 10_000_000 * priceIncreasePercent * 0.7
-        ),
+        expected_arr_change: Math.round(topSegmentArr * priceIncreasePercent * expectedRetention),
+        expected_arr_change_percent: Math.round(topSegment.revenue_share * priceIncreasePercent * expectedRetention * 100 * 10) / 10,
+        optimistic_arr_change: Math.round(topSegmentArr * priceIncreasePercent),
+        pessimistic_arr_change: Math.round(topSegmentArr * priceIncreasePercent * 0.7),
         expected_churn_increase: 0.005,
         time_to_full_impact_months: 3,
         confidence: 0.85,
@@ -225,46 +274,59 @@ export function generatePricingOptions(
   }
 
   // Option 4: Good-Better-Best Restructure
-  options.push({
-    id: "tier-restructure",
-    type: "packaging",
-    description:
-      "Simplify to 3 tiers (Starter, Growth, Enterprise) with clearer value differentiation. Reduces complexity and improves upgrade path.",
-    changes: [
-      {
-        type: "tier",
-        target: "Free + Start",
-        from: "2 tiers",
-        to: "Starter (€14.95)",
-        description: "Merge Free and Start into new Starter tier",
+  if (tiers.length >= 3) {
+    // Derive new tier prices from current structure
+    const lowTiers = tiers.slice(0, Math.ceil(tiers.length / 3));
+    const midTiers = tiers.slice(Math.ceil(tiers.length / 3), Math.ceil((tiers.length * 2) / 3));
+    const highTiers = tiers.slice(Math.ceil((tiers.length * 2) / 3));
+
+    const starterPrice = Math.round((lowTiers.reduce((s, t) => s + t.price, 0) / lowTiers.length) * 1.1);
+    const growthPrice = Math.round((midTiers.reduce((s, t) => s + t.price, 0) / midTiers.length) * 1.15);
+    const enterprisePrice = highTiers.length > 0
+      ? Math.round((highTiers.reduce((s, t) => s + t.price, 0) / highTiers.length) * 1.3)
+      : growthPrice * 3;
+
+    options.push({
+      id: "tier-restructure",
+      type: "packaging",
+      description:
+        `Simplify to 3 tiers (Starter, Growth, Enterprise) with clearer value differentiation. Reduces complexity and improves upgrade path.`,
+      changes: [
+        {
+          type: "tier",
+          target: lowTiers.map((t) => t.name).join(" + "),
+          from: `${lowTiers.length} tier${lowTiers.length > 1 ? "s" : ""}`,
+          to: `Starter (${starterPrice})`,
+          description: `Merge ${lowTiers.map((t) => t.name).join(" and ")} into Starter tier`,
+        },
+        {
+          type: "tier",
+          target: midTiers.map((t) => t.name).join(" + "),
+          from: `${midTiers.length} tier${midTiers.length > 1 ? "s" : ""}`,
+          to: `Growth (${growthPrice})`,
+          description: `Merge ${midTiers.map((t) => t.name).join(" and ")} into Growth tier`,
+        },
+        {
+          type: "tier",
+          target: highTiers.map((t) => t.name).join(" + ") || "Top tier",
+          from: highTiers.length > 0 ? `${highTiers[highTiers.length - 1].name} (${highTiers[highTiers.length - 1].price})` : "N/A",
+          to: `Enterprise (${enterprisePrice})`,
+          description: `Rebrand as Enterprise with enhanced features`,
+        },
+      ],
+      impact_model: {
+        expected_arr_change: Math.round(totalArr * 0.042),
+        expected_arr_change_percent: 4.2,
+        optimistic_arr_change: Math.round(totalArr * 0.075),
+        pessimistic_arr_change: Math.round(totalArr * 0.015),
+        expected_churn_increase: 0.03,
+        time_to_full_impact_months: 9,
+        confidence: 0.65,
       },
-      {
-        type: "tier",
-        target: "Plus + Premium",
-        from: "2 tiers",
-        to: "Growth (€79.95)",
-        description: "Merge Plus and Premium into new Growth tier",
-      },
-      {
-        type: "tier",
-        target: "Max",
-        from: "Max (€249.95)",
-        to: "Enterprise (€349.95)",
-        description: "Rebrand Max as Enterprise with enhanced features",
-      },
-    ],
-    impact_model: {
-      expected_arr_change: 450000,
-      expected_arr_change_percent: 4.2,
-      optimistic_arr_change: 750000,
-      pessimistic_arr_change: 150000,
-      expected_churn_increase: 0.03,
-      time_to_full_impact_months: 9,
-      confidence: 0.65,
-    },
-    risk_profile: "moderate",
-    complexity: "medium",
-  });
+      risk_profile: "moderate",
+      complexity: "medium",
+    });
+  }
 
   return options;
 }
@@ -278,19 +340,11 @@ export function evaluateWithCouncil(
   segments: DetectedSegment[],
   economics: UnitEconomics
 ): CouncilEvaluation {
-  // CFO Lens - Finance
   const financeView = evaluateAsFinance(option, economics);
-
-  // CRO Lens - Growth
   const growthView = evaluateAsGrowth(option, segments);
-
-  // CPO Lens - Product
-  const productView = evaluateAsProduct(option, segments);
-
-  // CSO Lens - Strategy
+  const productView = evaluateAsProduct(option);
   const strategyView = evaluateAsStrategy(option, economics);
 
-  // Synthesize recommendation
   const recommendation = synthesizeRecommendation(
     option,
     [financeView, growthView, productView, strategyView]
@@ -309,11 +363,9 @@ export function evaluateWithCouncil(
 function evaluateAsFinance(option: PricingOption, economics: UnitEconomics): AgentView {
   const impact = option.impact_model;
 
-  let reasoning = "";
   let recommendation: AgentView["recommendation"] = "neutral";
   const keyPoints: string[] = [];
 
-  // Evaluate revenue impact
   if (impact.expected_arr_change_percent > 5) {
     keyPoints.push(`Strong revenue uplift of ${impact.expected_arr_change_percent}%`);
     recommendation = "support";
@@ -324,7 +376,6 @@ function evaluateAsFinance(option: PricingOption, economics: UnitEconomics): Age
     recommendation = "oppose";
   }
 
-  // Evaluate confidence
   if (impact.confidence > 0.8) {
     keyPoints.push("High confidence in projections based on historical data");
     if (recommendation === "support") recommendation = "strongly_support";
@@ -333,17 +384,15 @@ function evaluateAsFinance(option: PricingOption, economics: UnitEconomics): Age
     if (recommendation === "support") recommendation = "neutral";
   }
 
-  // Evaluate concentration risk
   if (option.type === "price_increase" && economics.concentration.risk_level === "critical") {
     keyPoints.push("Warning: High revenue concentration increases risk of price increase");
   }
 
-  // Cash flow timing
   if (impact.time_to_full_impact_months > 6) {
     keyPoints.push(`Extended timeline (${impact.time_to_full_impact_months}mo) delays cash flow benefit`);
   }
 
-  reasoning = `From a financial perspective, this option shows ${
+  const reasoning = `From a financial perspective, this option shows ${
     impact.expected_arr_change > 0 ? "positive" : "negative"
   } revenue impact with ${impact.confidence > 0.7 ? "reasonable" : "uncertain"} confidence. ` +
     `The ${option.risk_profile} risk profile is ${
@@ -368,7 +417,6 @@ function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): A
   const keyPoints: string[] = [];
   let recommendation: AgentView["recommendation"] = "neutral";
 
-  // Evaluate churn impact
   const churnIncrease = option.impact_model.expected_churn_increase;
   if (churnIncrease > 0.1) {
     keyPoints.push(`High churn risk (${(churnIncrease * 100).toFixed(0)}%) threatens customer base`);
@@ -380,22 +428,24 @@ function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): A
     recommendation = "support";
   }
 
-  // Evaluate segment impact
-  const growingSegment = segments.find((s) => s.id === "growing");
-  if (growingSegment && option.type === "minimum") {
-    keyPoints.push("May create friction for scaling webshops - our growth engine");
+  // Use dynamic segment lookup
+  const growthSegment = findHighestExpansionSegment(segments);
+  if (growthSegment && option.type === "minimum") {
+    keyPoints.push(`May create friction for ${growthSegment.name} segment - the growth engine`);
   }
 
-  // Evaluate competitive position
   if (option.type === "price_increase") {
     keyPoints.push("Price increase may impact competitive win rate");
   }
 
-  // Expansion revenue
   if (option.type === "packaging" || option.type === "value_metric_change") {
     keyPoints.push("Clearer upgrade path could improve expansion revenue");
     if (recommendation !== "oppose") recommendation = "support";
   }
+
+  const lowestSegment = findLowestValueSegment(segments);
+  const secondLowest = findSecondLowestValueSegment(segments);
+  const affectedNames = [lowestSegment?.name, secondLowest?.name].filter(Boolean).join("/");
 
   const reasoning = `From a growth perspective, the ${(churnIncrease * 100).toFixed(1)}% expected churn increase ` +
     `${churnIncrease < 0.05 ? "is acceptable" : "is concerning"}. ` +
@@ -408,36 +458,32 @@ function evaluateAsGrowth(option: PricingOption, segments: DetectedSegment[]): A
     recommendation,
     impact: {
       churn_risk: `${(churnIncrease * 100).toFixed(1)}%`,
-      segment_impact: option.type === "minimum" ? "Hobby/Small" : "All segments",
+      segment_impact: option.type === "minimum" ? affectedNames || "Low-value segments" : "All segments",
       competitive_position: option.type === "price_increase" ? "Weakened" : "Maintained",
     },
     confidence: 0.7,
   };
 }
 
-function evaluateAsProduct(option: PricingOption, segments: DetectedSegment[]): AgentView {
+function evaluateAsProduct(option: PricingOption): AgentView {
   const keyPoints: string[] = [];
   let recommendation: AgentView["recommendation"] = "neutral";
 
-  // Value metric alignment
   if (option.type === "value_metric_change") {
     keyPoints.push("Usage-based pricing aligns cost with value delivered");
     recommendation = "strongly_support";
   }
 
-  // Packaging clarity
   if (option.type === "packaging") {
     keyPoints.push("Simplified tier structure improves upgrade path clarity");
     recommendation = "support";
   }
 
-  // Customer experience
   if (option.type === "minimum") {
     keyPoints.push("Platform minimum creates friction for trial/evaluation");
     keyPoints.push("May need free trial period to maintain conversion");
   }
 
-  // Feature bundling
   if (option.changes.some((c) => c.type === "feature")) {
     keyPoints.push("Feature changes require product development coordination");
   }
@@ -468,13 +514,11 @@ function evaluateAsStrategy(option: PricingOption, economics: UnitEconomics): Ag
   const keyPoints: string[] = [];
   let recommendation: AgentView["recommendation"] = "neutral";
 
-  // Long-term positioning
   if (option.type === "minimum") {
     keyPoints.push("Platform minimum signals market maturity and quality positioning");
     recommendation = "support";
   }
 
-  // Concentration risk
   if (economics.concentration.risk_level === "critical" || economics.concentration.risk_level === "high") {
     if (option.type === "price_increase") {
       keyPoints.push("Price increase on concentrated revenue base increases risk");
@@ -485,14 +529,12 @@ function evaluateAsStrategy(option: PricingOption, economics: UnitEconomics): Ag
     }
   }
 
-  // Reversibility
   if (option.complexity === "high") {
     keyPoints.push("Complex change is difficult to reverse - limits strategic optionality");
   } else {
     keyPoints.push("Change is reversible - maintains strategic flexibility");
   }
 
-  // Market timing
   keyPoints.push(
     option.risk_profile === "low"
       ? "Low-risk approach suitable for current market conditions"
@@ -527,7 +569,6 @@ function synthesizeRecommendation(
   option: PricingOption,
   views: AgentView[]
 ): CouncilRecommendation {
-  // Score the views
   const scoreMap: Record<AgentView["recommendation"], number> = {
     strongly_support: 2,
     support: 1,
@@ -539,7 +580,6 @@ function synthesizeRecommendation(
   const totalScore = views.reduce((sum, v) => sum + scoreMap[v.recommendation], 0);
   const avgScore = totalScore / views.length;
 
-  // Determine consensus
   const recommendations = views.map((v) => v.recommendation);
   const hasOpposition = recommendations.some((r) => r === "oppose" || r === "strongly_oppose");
   const hasSupport = recommendations.some((r) => r === "support" || r === "strongly_support");
@@ -550,7 +590,6 @@ function synthesizeRecommendation(
   else if (hasOpposition && hasSupport) consensus = "divided";
   else consensus = "weak";
 
-  // Build reasoning chain
   const reasoningChain: string[] = [];
 
   if (avgScore > 0) {
@@ -559,14 +598,12 @@ function synthesizeRecommendation(
     reasoningChain.push(`Mixed or negative assessment (score: ${avgScore.toFixed(1)}/2)`);
   }
 
-  // Add key insights from each view
   for (const view of views) {
     if (view.key_points.length > 0) {
       reasoningChain.push(`${view.agent}: ${view.key_points[0]}`);
     }
   }
 
-  // Identify trade-offs
   const tradeOffs: string[] = [];
   if (option.impact_model.expected_churn_increase > 0.02) {
     tradeOffs.push("Revenue growth vs. customer retention");
@@ -578,11 +615,10 @@ function synthesizeRecommendation(
     tradeOffs.push("Conflicting stakeholder priorities");
   }
 
-  // Generate summary
   let summary: string;
   if (avgScore >= 1) {
     summary = `The council recommends proceeding with "${option.description.substring(0, 50)}..." ` +
-      `with ${consensus} consensus. Expected ARR impact: €${option.impact_model.expected_arr_change.toLocaleString()}.`;
+      `with ${consensus} consensus. Expected ARR impact: ${option.impact_model.expected_arr_change.toLocaleString()}.`;
   } else if (avgScore >= 0) {
     summary = `The council has mixed views on this option. Consider modifications or alternative approaches ` +
       `before proceeding. Key concern: ${views.find((v) => scoreMap[v.recommendation] < 0)?.key_points[0] || "risk profile"}.`;
@@ -623,35 +659,38 @@ export function createDecisionRecord(
 }
 
 // =============================================================================
-// FULL FLOW EXECUTION
+// FULL FLOW EXECUTION (DB-backed)
 // =============================================================================
 
 export interface FlowResult {
   state: PricingFlowState;
-  data: GeneratedMyParcelData;
+  summary: RealDataResult["summary"];
+  segments: DetectedSegment[];
   options: PricingOption[];
   evaluations: CouncilEvaluation[];
   recommendedOption: PricingOption | null;
 }
 
-export async function runFullPricingFlow(organizationId: string): Promise<FlowResult> {
-  // Generate data
-  const data = generateMyParcelData();
+export async function runFullPricingFlow(
+  organizationId: string,
+  supabase: SupabaseClient
+): Promise<FlowResult> {
+  const data = await fetchRealPricingData(supabase, organizationId);
 
-  // Create flow state
+  if (!data || data.segments.length === 0) {
+    throw new Error("No company data found. Please set up a company first.");
+  }
+
   let state = createFlowState(organizationId);
 
-  // Update state with data
   state = {
     ...state,
     current_step: 4,
-    unified_customers: data.customers,
     segments: data.segments,
     pricing_structure: data.pricingStructure,
     economics: data.economics,
   };
 
-  // Generate options
   const options = generatePricingOptions(
     data.segments,
     data.economics,
@@ -664,12 +703,10 @@ export async function runFullPricingFlow(organizationId: string): Promise<FlowRe
     options,
   };
 
-  // Evaluate each option with council
   const evaluations: CouncilEvaluation[] = options.map((option) =>
     evaluateWithCouncil(option, data.segments, data.economics)
   );
 
-  // Find recommended option (highest consensus with positive score)
   const scoredOptions = evaluations.map((e, i) => ({
     evaluation: e,
     option: options[i],
@@ -694,7 +731,8 @@ export async function runFullPricingFlow(organizationId: string): Promise<FlowRe
 
   return {
     state,
-    data,
+    summary: data.summary,
+    segments: data.segments,
     options,
     evaluations,
     recommendedOption,

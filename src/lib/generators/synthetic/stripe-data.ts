@@ -14,6 +14,11 @@ import type {
   StripeInvoice,
   StripeInvoiceLineItem,
 } from "@/types/database";
+import type { CompanyProfile } from "@/types/company-profile";
+import {
+  generateCompanyName as generateCompanyNameForCountry,
+  generateEmail as generateEmailForCountry,
+} from "./name-generators";
 
 // Configuration
 const CONFIG = {
@@ -50,7 +55,7 @@ const CONFIG = {
   },
 };
 
-interface GeneratedStripeData {
+export interface GeneratedStripeData {
   products: Database["public"]["Tables"]["stripe_products"]["Insert"][];
   prices: Database["public"]["Tables"]["stripe_prices"]["Insert"][];
   customers: Database["public"]["Tables"]["stripe_customers"]["Insert"][];
@@ -386,4 +391,390 @@ export function generateStripeData(organizationId: string): GeneratedStripeData 
     invoices,
     invoiceLineItems,
   };
+}
+
+// =============================================================================
+// PROFILE-DRIVEN GENERATOR
+// =============================================================================
+
+/**
+ * Generate Stripe-like data from a CompanyProfile instead of hardcoded config.
+ * The original generateStripeData() above is preserved for backward compatibility.
+ */
+export function generateStripeDataFromProfile(
+  organizationId: string,
+  profile: CompanyProfile
+): GeneratedStripeData {
+  const products: GeneratedStripeData["products"] = [];
+  const prices: GeneratedStripeData["prices"] = [];
+  const customers: GeneratedStripeData["customers"] = [];
+  const subscriptions: GeneratedStripeData["subscriptions"] = [];
+  const invoices: GeneratedStripeData["invoices"] = [];
+  const invoiceLineItems: GeneratedStripeData["invoiceLineItems"] = [];
+
+  const currency = profile.currency.toLowerCase();
+  const productIdMap: Record<string, string> = {};
+  const priceIdMap: Record<string, string> = {};
+
+  const now = new Date();
+  const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+  const twoYearsAgo = new Date(now.getTime() - 730 * 24 * 60 * 60 * 1000);
+
+  // ── 1. Subscription products from profile.pricing_tiers ────────────────
+
+  // Sort tiers by position so we can reference them by index later
+  const sortedTiers = [...profile.pricing_tiers].sort(
+    (a, b) => a.position - b.position
+  );
+
+  for (const tier of sortedTiers) {
+    const productId = uuidv4();
+    const stripeProductId = generateStripeId("prod");
+    productIdMap[tier.name] = productId;
+
+    const limitEntries = Object.entries(tier.value_metric_limits);
+    const limitDesc =
+      limitEntries.length > 0
+        ? limitEntries
+            .map(([k, v]) => `${v === "unlimited" ? "Unlimited" : v} ${k}`)
+            .join(", ")
+        : "Standard access";
+
+    products.push({
+      organization_id: organizationId,
+      stripe_id: stripeProductId,
+      name: `${profile.name} ${tier.name}`,
+      description: `${tier.name} subscription tier - ${limitDesc}`,
+      active: true,
+      unit_label: "subscription",
+      metadata: {
+        tier: tier.name,
+        position: tier.position,
+        value_metric_limits: tier.value_metric_limits,
+      },
+      stripe_created: new Date(
+        Date.now() - 365 * 24 * 60 * 60 * 1000
+      ).toISOString(),
+    });
+
+    // Monthly price (convert to cents: price_monthly * 100)
+    const monthlyAmountCents = Math.round(tier.price_monthly * 100);
+    const monthlyPriceId = uuidv4();
+    priceIdMap[`${tier.name}_monthly`] = monthlyPriceId;
+
+    prices.push({
+      organization_id: organizationId,
+      stripe_id: generateStripeId("price"),
+      product_id: productId,
+      stripe_product_id: stripeProductId,
+      active: true,
+      currency,
+      unit_amount: monthlyAmountCents,
+      type: "recurring",
+      billing_scheme: "per_unit",
+      recurring_interval: "month",
+      recurring_interval_count: 1,
+      recurring_usage_type: "licensed",
+      metadata: {},
+      stripe_created: new Date(
+        Date.now() - 365 * 24 * 60 * 60 * 1000
+      ).toISOString(),
+    });
+
+    // Annual price (use tier.price_annual if provided, else 10% discount)
+    if (tier.price_monthly > 0) {
+      const annualAmountCents = tier.price_annual
+        ? Math.round(tier.price_annual * 100)
+        : Math.floor(monthlyAmountCents * 12 * 0.9);
+
+      const discountPct = tier.price_annual
+        ? Math.round(
+            (1 - tier.price_annual / (tier.price_monthly * 12)) * 100
+          )
+        : 10;
+
+      prices.push({
+        organization_id: organizationId,
+        stripe_id: generateStripeId("price"),
+        product_id: productId,
+        stripe_product_id: stripeProductId,
+        active: true,
+        currency,
+        unit_amount: annualAmountCents,
+        type: "recurring",
+        billing_scheme: "per_unit",
+        recurring_interval: "year",
+        recurring_interval_count: 1,
+        recurring_usage_type: "licensed",
+        metadata: { discount: `${discountPct}%` },
+        stripe_created: new Date(
+          Date.now() - 365 * 24 * 60 * 60 * 1000
+        ).toISOString(),
+      });
+    }
+  }
+
+  // ── 2. Usage / one-time products from profile.products ─────────────────
+
+  const nonSubProducts = profile.products.filter(
+    (p) => p.type !== "subscription"
+  );
+
+  for (const prod of nonSubProducts) {
+    const productId = uuidv4();
+    const stripeProductId = generateStripeId("prod");
+    productIdMap[prod.name] = productId;
+
+    products.push({
+      organization_id: organizationId,
+      stripe_id: stripeProductId,
+      name: prod.name,
+      description: `${prod.name}${prod.unit_label ? " - per " + prod.unit_label : ""}`,
+      active: true,
+      unit_label: prod.unit_label || undefined,
+      metadata: { product_type: prod.type },
+      stripe_created: new Date(
+        Date.now() - 365 * 24 * 60 * 60 * 1000
+      ).toISOString(),
+    });
+
+    const priceId = uuidv4();
+    priceIdMap[prod.name] = priceId;
+
+    prices.push({
+      organization_id: organizationId,
+      stripe_id: generateStripeId("price"),
+      product_id: productId,
+      stripe_product_id: stripeProductId,
+      active: true,
+      currency,
+      unit_amount: Math.round(prod.base_price * 100),
+      type: prod.type === "usage" ? "recurring" : "one_time",
+      billing_scheme: "per_unit",
+      ...(prod.type === "usage"
+        ? {
+            recurring_interval: "month" as const,
+            recurring_interval_count: 1,
+            recurring_usage_type: "metered" as const,
+          }
+        : {}),
+      metadata: {},
+      stripe_created: new Date(
+        Date.now() - 365 * 24 * 60 * 60 * 1000
+      ).toISOString(),
+    });
+  }
+
+  // ── 3. Generate customers distributed across segments ──────────────────
+
+  const totalCustomers = profile.total_customers;
+  let customerIndex = 0;
+
+  for (const segment of profile.segments) {
+    const segmentCount = Math.max(
+      1,
+      Math.floor(totalCustomers * segment.customer_share)
+    );
+
+    // Determine which tiers this segment's customers lean toward.
+    // Higher-value segments get higher-positioned tiers.
+    const tierCandidates = assignTiersForSegment(segment, sortedTiers);
+
+    for (let i = 0; i < segmentCount; i++) {
+      const customerId = uuidv4();
+      const stripeCustomerId = generateStripeId("cus");
+      const companyName = generateCompanyNameForCountry(profile.country);
+      const email = generateEmailForCountry(companyName, profile.country);
+      const createdDate = randomDate(twoYearsAgo, oneYearAgo);
+
+      // Pick tier for this customer
+      const assignedTier = tierCandidates[i % tierCandidates.length];
+      const monthlyMrrBase = segment.avg_mrr;
+      // Random in range avg_mrr +/- 50%
+      const monthlyMrr = randomInRange(
+        Math.max(0, Math.floor(monthlyMrrBase * 0.5)),
+        Math.floor(monthlyMrrBase * 1.5)
+      );
+
+      customers.push({
+        organization_id: organizationId,
+        stripe_id: stripeCustomerId,
+        email,
+        name: companyName,
+        description: `${segment.name} customer`,
+        currency,
+        balance: 0,
+        delinquent: Math.random() < 0.02,
+        metadata: {
+          segment: segment.name,
+          tier: assignedTier.name,
+          monthly_mrr: monthlyMrr,
+          customer_index: customerIndex,
+          company_size: segment.company_size,
+        },
+        stripe_created: createdDate.toISOString(),
+      });
+
+      // Create subscription
+      const subscriptionId = uuidv4();
+      const stripeSubscriptionId = generateStripeId("sub");
+      const periodStart = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const periodEnd = new Date(now.getTime());
+
+      // Churn probability based on segment's churn_rate (annualised)
+      const isActive = Math.random() > segment.churn_rate * 12;
+
+      subscriptions.push({
+        organization_id: organizationId,
+        stripe_id: stripeSubscriptionId,
+        customer_id: customerId,
+        stripe_customer_id: stripeCustomerId,
+        status: isActive ? "active" : "canceled",
+        current_period_start: periodStart.toISOString(),
+        current_period_end: periodEnd.toISOString(),
+        cancel_at_period_end: false,
+        canceled_at: isActive ? undefined : now.toISOString(),
+        collection_method: "charge_automatically",
+        metadata: { tier: assignedTier.name },
+        stripe_created: createdDate.toISOString(),
+      });
+
+      // Generate 12 months of invoices
+      const subscriptionAmountCents = Math.round(
+        assignedTier.price_monthly * 100
+      );
+
+      for (let month = 0; month < 12; month++) {
+        const invoiceDate = new Date(
+          now.getTime() - month * 30 * 24 * 60 * 60 * 1000
+        );
+        const invoiceId = uuidv4();
+        const stripeInvoiceId = generateStripeId("in");
+
+        // Usage amount: difference between MRR and subscription fee
+        const usageAmountCents = Math.max(
+          0,
+          monthlyMrr * 100 - subscriptionAmountCents
+        );
+        const totalAmount = subscriptionAmountCents + usageAmountCents;
+
+        invoices.push({
+          organization_id: organizationId,
+          stripe_id: stripeInvoiceId,
+          customer_id: customerId,
+          stripe_customer_id: stripeCustomerId,
+          subscription_id: subscriptionId,
+          stripe_subscription_id: stripeSubscriptionId,
+          status: "paid",
+          collection_method: "charge_automatically",
+          currency,
+          amount_due: totalAmount,
+          amount_paid: totalAmount,
+          amount_remaining: 0,
+          subtotal: totalAmount,
+          total: totalAmount,
+          period_start: new Date(
+            invoiceDate.getTime() - 30 * 24 * 60 * 60 * 1000
+          ).toISOString(),
+          period_end: invoiceDate.toISOString(),
+          paid_at: invoiceDate.toISOString(),
+          number: `INV-${customerIndex.toString().padStart(5, "0")}-${(12 - month).toString().padStart(2, "0")}`,
+          metadata: {},
+          stripe_created: invoiceDate.toISOString(),
+        });
+
+        // Subscription line item
+        if (subscriptionAmountCents > 0) {
+          invoiceLineItems.push({
+            organization_id: organizationId,
+            stripe_id: generateStripeId("il"),
+            invoice_id: invoiceId,
+            stripe_invoice_id: stripeInvoiceId,
+            type: "subscription",
+            description: `${profile.name} ${assignedTier.name} subscription`,
+            currency,
+            amount: subscriptionAmountCents,
+            quantity: 1,
+            stripe_price_id: generateStripeId("price"),
+            period_start: new Date(
+              invoiceDate.getTime() - 30 * 24 * 60 * 60 * 1000
+            ).toISOString(),
+            period_end: invoiceDate.toISOString(),
+            proration: false,
+            metadata: {},
+          });
+        }
+
+        // Usage line items (spread across non-subscription products)
+        if (usageAmountCents > 0 && nonSubProducts.length > 0) {
+          const amountPerProduct = Math.floor(
+            usageAmountCents / nonSubProducts.length
+          );
+          for (const prod of nonSubProducts) {
+            if (amountPerProduct > 0) {
+              const unitPriceCents = Math.round(prod.base_price * 100);
+              const qty =
+                unitPriceCents > 0
+                  ? Math.max(1, Math.floor(amountPerProduct / unitPriceCents))
+                  : 1;
+              invoiceLineItems.push({
+                organization_id: organizationId,
+                stripe_id: generateStripeId("il"),
+                invoice_id: invoiceId,
+                stripe_invoice_id: stripeInvoiceId,
+                type: "invoiceitem",
+                description: `${prod.name}${prod.unit_label ? " (" + prod.unit_label + "s)" : ""}`,
+                currency,
+                amount: amountPerProduct,
+                quantity: qty,
+                period_start: new Date(
+                  invoiceDate.getTime() - 30 * 24 * 60 * 60 * 1000
+                ).toISOString(),
+                period_end: invoiceDate.toISOString(),
+                proration: false,
+                metadata: { product: prod.name },
+              });
+            }
+          }
+        }
+      }
+
+      customerIndex++;
+    }
+  }
+
+  return {
+    products,
+    prices,
+    customers,
+    subscriptions,
+    invoices,
+    invoiceLineItems,
+  };
+}
+
+/**
+ * For a given segment, select which tiers its customers are likely on.
+ * Higher avg_mrr segments skew toward higher-positioned tiers.
+ */
+function assignTiersForSegment(
+  segment: CompanyProfile["segments"][number],
+  sortedTiers: CompanyProfile["pricing_tiers"]
+) {
+  if (sortedTiers.length === 0) return sortedTiers;
+
+  // Find tiers whose price is at most 2x the segment avg_mrr
+  // If none match, take the closest tier
+  const candidates = sortedTiers.filter(
+    (t) => t.price_monthly <= segment.avg_mrr * 2
+  );
+
+  if (candidates.length === 0) {
+    // All tiers are too expensive; use the lowest tier
+    return [sortedTiers[0]];
+  }
+
+  // Prefer the top 2-3 tiers the segment can afford
+  const topCandidates = candidates.slice(-3);
+  return topCandidates;
 }
