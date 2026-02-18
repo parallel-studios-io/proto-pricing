@@ -8,6 +8,8 @@ import { getPreset } from "@/lib/generators/presets";
 import { DEMO_ORGANIZATION_ID } from "@/types/database";
 import type { PresetId, CompanyProfile } from "@/types/company-profile";
 
+export const maxDuration = 300; // 5 minutes — Claude profile generation + market research
+
 /**
  * POST /api/company/setup
  *

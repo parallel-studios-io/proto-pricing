@@ -3,6 +3,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { DEMO_ORGANIZATION_ID } from "@/types/database";
 import type { CompanyProfile } from "@/types/company-profile";
 
+export const maxDuration = 300; // 5 minutes — seeds thousands of records + Claude enrichment
+
 /**
  * POST /api/company/generate
  *

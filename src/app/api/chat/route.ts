@@ -7,6 +7,8 @@ import { DEMO_ORGANIZATION_ID } from "@/types/database";
 import type { ChatRequest, ChatResponse, ChatMessage } from "@/types/chat";
 import type { AgentId } from "@/types/agents";
 
+export const maxDuration = 60; // 1 minute for Claude chat responses
+
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
