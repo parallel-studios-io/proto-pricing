@@ -3,8 +3,9 @@
 import { useState, useEffect } from "react";
 import { Header } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button } from "@/components/ui";
-import { Play, Loader2, CheckCircle, TrendingUp, TrendingDown, AlertTriangle, Users, DollarSign, BarChart3, MessageSquare } from "lucide-react";
+import { Play, Loader2, CheckCircle, TrendingUp, AlertTriangle, Users, DollarSign, BarChart3, MessageSquare, Brain, Sparkles, Target } from "lucide-react";
 import Link from "next/link";
+import { DEMO_ORGANIZATION_ID } from "@/types/database";
 import type {
   PricingOption,
   CouncilEvaluation,
@@ -30,13 +31,10 @@ interface AnalysisResult {
 }
 
 const FLOW_STEPS = [
-  { id: 1, name: "Ingest & Normalize", description: "Pull raw data from connected systems" },
-  { id: 2, name: "Segment Detection", description: "Cluster customers by behavior and value" },
-  { id: 3, name: "Pricing Structure", description: "Map current pricing model and tiers" },
-  { id: 4, name: "Unit Economics", description: "Calculate ARPU, LTV, churn per segment" },
-  { id: 5, name: "Option Generation", description: "Generate pricing options with impact models" },
-  { id: 6, name: "Council Evaluation", description: "Four agents evaluate each option" },
-  { id: 7, name: "Recommendation", description: "Synthesize final recommendation" },
+  { id: 1, name: "Loading Ontology", icon: BarChart3 },
+  { id: 2, name: "Generating Options", icon: Sparkles },
+  { id: 3, name: "Agent Evaluation", icon: Brain },
+  { id: 4, name: "Recommendation", icon: Target },
 ];
 
 export default function AnalysisPage() {
@@ -46,23 +44,26 @@ export default function AnalysisPage() {
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
 
   const runAnalysis = async () => {
+    if (isRunning) return;
     setIsRunning(true);
     setCurrentStep(1);
     setResult(null);
 
-    // Simulate step progression
-    for (let step = 1; step <= 7; step++) {
-      setCurrentStep(step);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-
     try {
-      const response = await fetch("/api/pricing/analyze", {
+      // Start the API call immediately
+      const responsePromise = fetch("/api/pricing/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ organizationId: "myparcel-demo" }),
+        body: JSON.stringify({ organizationId: DEMO_ORGANIZATION_ID }),
       });
 
+      // Animate through steps while waiting
+      for (let step = 1; step <= FLOW_STEPS.length; step++) {
+        setCurrentStep(step);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
+      const response = await responsePromise;
       const data = await response.json();
 
       if (data.success) {
@@ -77,6 +78,12 @@ export default function AnalysisPage() {
 
     setIsRunning(false);
   };
+
+  // Auto-run on mount
+  useEffect(() => {
+    runAnalysis();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const getAgentColor = (agent: string) => {
     const colors: Record<string, string> = {
@@ -98,7 +105,7 @@ export default function AnalysisPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <Header title="Pricing Analysis" subtitle="Run the 7-step pricing decision flow" />
+      <Header title="Pricing Analysis" subtitle="Generate options and evaluate with agent council" />
 
       <div className="flex-1 overflow-auto p-6">
         {/* Flow Steps */}
@@ -123,37 +130,42 @@ export default function AnalysisPage() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center justify-between">
-              {FLOW_STEPS.map((step, index) => (
-                <div key={step.id} className="flex items-center">
-                  <div className="flex flex-col items-center">
-                    <div
-                      className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
-                        currentStep > step.id
-                          ? "bg-green-500 text-white"
-                          : currentStep === step.id
-                          ? "bg-white text-black"
-                          : "bg-card border border-border text-muted"
-                      }`}
-                    >
-                      {currentStep > step.id ? (
-                        <CheckCircle className="w-5 h-5" />
-                      ) : (
-                        step.id
-                      )}
+              {FLOW_STEPS.map((step, index) => {
+                const Icon = step.icon;
+                return (
+                  <div key={step.id} className="flex items-center">
+                    <div className="flex flex-col items-center">
+                      <div
+                        className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
+                          currentStep > step.id
+                            ? "bg-green-500 text-white"
+                            : currentStep === step.id
+                            ? "bg-white text-black"
+                            : "bg-card border border-border text-muted"
+                        }`}
+                      >
+                        {currentStep > step.id ? (
+                          <CheckCircle className="w-5 h-5" />
+                        ) : currentStep === step.id ? (
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                        ) : (
+                          <Icon className="w-5 h-5" />
+                        )}
+                      </div>
+                      <span className="text-xs mt-2 text-center max-w-[100px] text-muted">
+                        {step.name}
+                      </span>
                     </div>
-                    <span className="text-xs mt-2 text-center max-w-[80px] text-muted">
-                      {step.name}
-                    </span>
+                    {index < FLOW_STEPS.length - 1 && (
+                      <div
+                        className={`w-16 h-0.5 mx-3 ${
+                          currentStep > step.id ? "bg-green-500" : "bg-border"
+                        }`}
+                      />
+                    )}
                   </div>
-                  {index < FLOW_STEPS.length - 1 && (
-                    <div
-                      className={`w-12 h-0.5 mx-2 ${
-                        currentStep > step.id ? "bg-green-500" : "bg-border"
-                      }`}
-                    />
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </CardContent>
         </Card>

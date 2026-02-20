@@ -17,7 +17,7 @@ import { useSetup } from "@/contexts/SetupContext";
 
 const STEPS = [
   { id: "setup", label: "Loading company profile", icon: Database },
-  { id: "generating", label: "Generating synthetic data", icon: BarChart3 },
+  { id: "generating", label: "Ingesting connected data", icon: BarChart3 },
   { id: "ontology", label: "Building business ontology", icon: Brain },
   { id: "enriching", label: "Enriching with AI insights", icon: Sparkles },
   { id: "market", label: "Researching market context", icon: Globe },
