@@ -25,6 +25,8 @@ export async function POST(request: NextRequest) {
     const {
       description,
       preset,
+      name: explicitName,
+      website,
       organizationId = DEMO_ORGANIZATION_ID,
     } = body;
 
@@ -51,20 +53,71 @@ export async function POST(request: NextRequest) {
       }
       profile = presetDef.profile;
     } else {
+      // Build enriched description with name/URL if provided
+      let enrichedDescription = description;
+      if (explicitName) {
+        enrichedDescription = `Company name: ${explicitName}. ${enrichedDescription}`;
+      }
+      if (website) {
+        enrichedDescription = `${enrichedDescription} Website: ${website}`;
+      }
+
       // Generate from description using Claude
       console.log("Generating company profile from description...");
-      profile = await generateCompanyProfile(description);
+      profile = await generateCompanyProfile(enrichedDescription);
+
+      // Override name if explicitly provided
+      if (explicitName) {
+        profile.name = explicitName;
+      }
+      if (website) {
+        profile.website = website;
+      }
 
       // Enrich with market research
       console.log("Enriching with market research...");
       profile = await enrichWithMarketResearch(profile);
     }
 
-    // Store the profile on the organization
     const supabase = createAdminClient();
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error: updateError } = await (supabase as any)
+    const db = supabase as any;
+
+    // For presets, check if data is already seeded (idempotency)
+    if (preset) {
+      const { count } = await db
+        .from("segments")
+        .select("*", { count: "exact", head: true })
+        .eq("organization_id", organizationId);
+
+      if (count && count > 0) {
+        // Data already seeded — just ensure profile is up to date and return
+        await db
+          .from("organizations")
+          .upsert(
+            {
+              id: organizationId,
+              name: profile.name,
+              slug: profile.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+              settings: {},
+              company_profile: JSON.parse(JSON.stringify(profile)),
+              setup_status: "ready",
+            },
+            { onConflict: "id" }
+          );
+
+        return NextResponse.json({
+          success: true,
+          organizationId,
+          profile,
+          status: "ready",
+          preSeeded: true,
+        });
+      }
+    }
+
+    // Store the profile on the organization
+    const { error: updateError } = await db
       .from("organizations")
       .upsert(
         {

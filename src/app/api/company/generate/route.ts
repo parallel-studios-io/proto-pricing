@@ -53,6 +53,16 @@ export async function POST(request: NextRequest) {
 
     const profile = org.company_profile as CompanyProfile;
 
+    // If already generated, return success without re-seeding
+    if (org.setup_status === "ready") {
+      return NextResponse.json({
+        success: true,
+        organizationId,
+        companyName: profile.name,
+        status: "ready",
+      });
+    }
+
     // Update status to generating
     await db
       .from("organizations")
