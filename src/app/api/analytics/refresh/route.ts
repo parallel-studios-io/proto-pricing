@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { runFullAnalytics } from "@/lib/analytics";
 
 export async function POST(request: NextRequest) {
@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const supabase = await createServerSupabaseClient();
+    const supabase = createAdminClient() as any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
     // Verify organization exists
     const { data: org, error: orgError } = await supabase
@@ -72,7 +72,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const supabase = await createServerSupabaseClient();
+    const supabase = createAdminClient() as any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
     // Get latest analytics run
     const { data } = await supabase
